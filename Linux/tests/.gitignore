@@ -4,3 +4,6 @@
 /test_backend_memory
 /test_run_command
 /test_aod_aml
+/test_memory_config
+/test_bench_portability
+__pycache__/

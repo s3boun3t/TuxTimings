@@ -1,4 +1,6 @@
 #include "backend.h"
+#include "memory_config.h"
+#include "build_info.h"
 #include "pm_table.h"
 #include "dram.h"
 #include "dimm_sensors.h"
@@ -297,9 +299,13 @@ static void parse_dmidecode_memory(void)
             cur.rank = (r == 4) ? RANK_QR : (r == 2) ? RANK_DR : RANK_SR;
         }
         else if (strstr(trimmed, "Configured Memory Speed") || strstr(trimmed, "Configured Clock Speed")) {
-            uint32_t mhz = 0;
-            sscanf(val, "%u", &mhz);
-            cur.clock_speed_mhz = mhz;
+            unsigned speed = 0;
+            char unit[16] = {0};
+            if (sscanf(val, "%u %15s", &speed, unit) == 2) {
+                cur.configured_speed = speed;
+                if (!strcmp(unit, "MT/s")) cur.configured_speed_unit = VALUE_UNIT_MTS;
+                else if (!strcmp(unit, "MHz")) cur.configured_speed_unit = VALUE_UNIT_MHZ;
+            }
         }
 
         line = strtok(NULL, "\n");
@@ -454,18 +460,6 @@ static void read_total_memory(char *buf, size_t sz)
     }
     fclose(f);
     buf[0] = '\0';
-}
-
-/* ── Memory type from codename ──────────────────────────────────────── */
-
-static mem_type_t mem_type_for_codename(int idx)
-{
-    switch (idx) {
-    case 23: return MEM_DDR5;
-    case 4: case 9: case 10: case 12: case 18: case 19:
-        return MEM_DDR4;
-    default: return MEM_UNKNOWN;
-    }
 }
 
 /* ── hwmon helpers ──────────────────────────────────────────────────── */
@@ -1038,10 +1032,17 @@ void backend_read_summary(system_summary_t *out)
         free(pm_floats);
     }
 
-    /* BCLK: DMI (exact BIOS value) with MSR as fallback */
+    /* BCLK: reported SMBIOS configuration, then cpufreq/MSR estimate. */
     out->metrics.bclk_mhz = try_read_bclk_dmi();
-    if (out->metrics.bclk_mhz <= 0.0f)
+    if (out->metrics.bclk_mhz > 0.0f) {
+        out->metrics.bclk_info = (value_info_t){true, VALUE_SOURCE_SMBIOS, VALUE_UNIT_MHZ};
+    } else {
         out->metrics.bclk_mhz = try_read_bclk();
+        out->metrics.bclk_info = (value_info_t){
+            isfinite(out->metrics.bclk_mhz) && out->metrics.bclk_mhz > 0.0f,
+            VALUE_SOURCE_MSR_ESTIMATE, VALUE_UNIT_MHZ
+        };
+    }
 
     /* Memory voltages from aod_voltages kernel module sysfs */
     {
@@ -1071,27 +1072,9 @@ void backend_read_summary(system_summary_t *out)
     dram_read_timings(codename_idx, &out->dram);
 
     /* Memory config */
-    out->memory.type = mem_type_for_codename(codename_idx);
-    float mem_freq = out->dram.frequency_hint_mhz;
-
-    /* dmidecode "Configured Memory Speed" (MT/s) */
-    uint32_t max_cfg = 0;
-    for (int i = 0; i < s_module_count; i++) {
-        if (s_modules[i].clock_speed_mhz > max_cfg)
-            max_cfg = s_modules[i].clock_speed_mhz;
-    }
-    if (out->memory.type == MEM_DDR4) {
-        /* For DDR4, prefer SMN-derived effective MT/s; fall back to dmidecode. */
-        if (mem_freq <= 0.0f && max_cfg > 0)
-            mem_freq = (float)max_cfg;
-    } else {
-        /* Non-DDR4: prefer timing-derived hint, else fall back to MCLK MHz. */
-        if (mem_freq == 0 && out->metrics.mclk_mhz > 0)
-            mem_freq = out->metrics.mclk_mhz;
-        else if (mem_freq <= 0.0f && max_cfg > 0)
-            mem_freq = (float)max_cfg;
-    }
-    out->memory.frequency = mem_freq;
+    memory_config_resolve(&out->memory, s_modules, s_module_count,
+                          s_module_inventory_complete, &out->dram,
+                          out->metrics.mclk_mhz);
     read_total_memory(out->memory.total_capacity, sizeof(out->memory.total_capacity));
 
     /* Build part number string from unique module part numbers */
@@ -1158,6 +1141,8 @@ char *backend_read_debug_dump(void)
     do { off += (size_t)snprintf(buf + off, cap - off, fmt, ##__VA_ARGS__); } while (0)
 
     /* ── SMU sysfs values ─────────────────────────────────────────── */
+    DUMP("%s\n", TUXTIMINGS_BUILD_ID);
+    DUMP("DRAM timing source: UMC0; independent of selected DIMM.\n");
     DUMP("=== SMU Info ===\n");
     {
         char tmp[256];

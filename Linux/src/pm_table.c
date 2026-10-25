@@ -19,19 +19,6 @@ typedef struct {
     int max_cores;
 } pm_family_map_t;
 
-/* Granite Ridge (default/fallback) */
-static const pm_family_map_t GRANITE_RIDGE = {
-    .named = {
-        {11, F_IOD_HOTSPOT}, {58, F_VDD_MISC}, {71, F_FCLK}, {75, F_UCLK},
-        {79, F_MCLK}, {83, F_VSOC}, {259, F_VDDG_IOD}, {261, F_VDDG_CCD},
-        {269, F_VDDP}, {271, F_VCORE}
-    },
-    .named_count = 10,
-    .vid_idx = 275, .ppt_idx = 3, .socket_power_idx = 29,
-    .core_voltage_start = 309, .core_temp_start = 317, .core_clock_start = 325,
-    .max_cores = 8
-};
-
 /* Vermeer 0x380804 (5900X/5950X 16-core, older BIOS) */
 static const pm_family_map_t VERMEER_380804 = {
     .named = {
@@ -239,7 +226,7 @@ static const pm_family_map_t *get_family_map(uint32_t version)
     case 0x370005: return &RENOIR_370005;
     case 0x4C0009: return &HAWK_POINT_4C0009;
     case 0x1E0004: return &RAVEN_1E0004;
-    default:       return &GRANITE_RIDGE;
+    default:       return NULL;
     }
 }
 
@@ -306,6 +293,7 @@ void pm_table_read(uint32_t version, const float *table, int count,
 
     /* All families use the version-based map for named entries */
     const pm_family_map_t *map = get_family_map(version);
+    if (!map) return; /* Unknown versions have no established layout. */
     /* 0x380905 stores eight hardware slots even on six-core Vermeer.
      * Eight-core layout corroborated on 5700X3D (372 float entries).
      * Do not infer fused-slot topology for six-core parts here.
@@ -341,7 +329,7 @@ void pm_table_read(uint32_t version, const float *table, int count,
         nc = physical_cores;
     if (nc > MAX_CORES) nc = MAX_CORES;
 
-    if (map->core_temp_start + nc <= count) {
+    if (map->core_temp_start >= 0 && map->core_temp_start + nc <= count) {
         out->core_temps_count = nc;
         for (int i = 0; i < nc; i++)
             out->core_temps_c[i] = table[map->core_temp_start + i];
@@ -351,7 +339,7 @@ void pm_table_read(uint32_t version, const float *table, int count,
         out->core_voltages_count = nc;
         for (int i = 0; i < nc; i++)
             out->core_voltages[i] = table[180 + i];
-    } else if (map->core_voltage_start + nc <= count) {
+    } else if (map->core_voltage_start >= 0 && map->core_voltage_start + nc <= count) {
         int out_idx = 0;
         // Scan all possible slots, collect up to 'nc' non-zero voltages
         for (int i = 0; i < map->max_cores; i++) {
@@ -375,7 +363,11 @@ void pm_table_read(uint32_t version, const float *table, int count,
 
     /* PPT — always read directly from ppt_idx */
     float ppt_v = safe_get(table, count, map->ppt_idx);
-    if (ppt_v >= 0.5f && ppt_v <= 400.0f) out->ppt_w = ppt_v;
+    if (map->ppt_idx >= 0 && map->ppt_idx < count &&
+        isfinite(ppt_v) && ppt_v >= 0.0f && ppt_v <= 400.0f) {
+        out->ppt_w = ppt_v;
+        out->ppt_available = true;
+    }
 
     /* Socket power */
     float sp = safe_get(table, count, map->socket_power_idx);

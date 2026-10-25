@@ -30,10 +30,10 @@ static bool try_read_smn(uint32_t address, uint32_t *value)
     return ok;
 }
 
-static uint32_t read_smn(uint32_t address)
+static uint32_t read_register(uint32_t address, uint32_t mask, dram_timings_t *d)
 {
     uint32_t value;
-    try_read_smn(address, &value);
+    if (try_read_smn(address, &value)) d->available |= mask;
     return value;
 }
 
@@ -52,38 +52,47 @@ const char *dram_fgr_label(uint32_t code)
     }
 }
 
-static float to_nanoseconds(uint32_t cycles, float freq_mhz)
+/* data_rate_mts is effective DDR MT/s; the clock period is 2000/rate ns. */
+static void convert_timings(dram_timings_t *d)
 {
-    if (freq_mhz <= 0) return 0;
-    float ns = (float)cycles * 2000.0f / freq_mhz;
-    if (ns > (float)cycles) ns /= 2.0f;
-    return ns;
+    if (!d->data_rate_info.available) return;
+    const float period_ns = 2000.0f / d->data_rate_mts;
+    if (dram_has(d, DRAM_REG_50230)) d->trefi_ns = d->refi * period_ns;
+    if (dram_has(d, DRAM_VALUE_RFC)) {
+        d->trfc_ns = d->rfc * period_ns;
+        d->trfc2_ns = d->rfc2 * period_ns;
+        d->trfc4_ns = d->rfc4 * period_ns;
+    }
+    if (dram_has(d, DRAM_VALUE_RFCSB)) d->trfcsb_ns = d->rfcsb * period_ns;
 }
 
 /* Common timing extraction from SMN registers — shared between DDR4 and DDR5 */
 static void read_common_timings(uint32_t offset, dram_timings_t *d)
 {
-    uint32_t reg50204 = read_smn(offset | 0x50204);
-    uint32_t reg50208 = read_smn(offset | 0x50208);
-    uint32_t reg5020C = read_smn(offset | 0x5020C);
-    uint32_t reg50210 = read_smn(offset | 0x50210);
-    uint32_t reg50214 = read_smn(offset | 0x50214);
-    uint32_t reg50218 = read_smn(offset | 0x50218);
-    uint32_t reg5021C = read_smn(offset | 0x5021C);
-    uint32_t reg50220 = read_smn(offset | 0x50220);
-    uint32_t reg50224 = read_smn(offset | 0x50224);
-    uint32_t reg50228 = read_smn(offset | 0x50228);
-    uint32_t reg50230 = read_smn(offset | 0x50230);
-    uint32_t reg50234 = read_smn(offset | 0x50234);
-    uint32_t reg50250 = read_smn(offset | 0x50250);
-    uint32_t reg50254 = read_smn(offset | 0x50254);
-    uint32_t reg50258 = read_smn(offset | 0x50258);
-    uint32_t reg502A4 = read_smn(offset | 0x502A4);
+    uint32_t reg50204 = read_register(offset | 0x50204, DRAM_REG_50204, d);
+    uint32_t reg50208 = read_register(offset | 0x50208, DRAM_REG_50208, d);
+    uint32_t reg5020C = read_register(offset | 0x5020C, DRAM_REG_5020C, d);
+    uint32_t reg50210 = read_register(offset | 0x50210, DRAM_REG_50210, d);
+    uint32_t reg50214 = read_register(offset | 0x50214, DRAM_REG_50214, d);
+    uint32_t reg50218 = read_register(offset | 0x50218, DRAM_REG_50218, d);
+    uint32_t reg5021C = read_register(offset | 0x5021C, DRAM_REG_5021C, d);
+    uint32_t reg50220 = read_register(offset | 0x50220, DRAM_REG_50220, d);
+    uint32_t reg50224 = read_register(offset | 0x50224, DRAM_REG_50224, d);
+    uint32_t reg50228 = read_register(offset | 0x50228, DRAM_REG_50228, d);
+    uint32_t reg50230 = read_register(offset | 0x50230, DRAM_REG_50230, d);
+    uint32_t reg50234 = read_register(offset | 0x50234, DRAM_REG_50234, d);
+    uint32_t reg50250 = read_register(offset | 0x50250, DRAM_REG_50250, d);
+    uint32_t reg50254 = read_register(offset | 0x50254, DRAM_REG_50254, d);
+    uint32_t reg50258 = read_register(offset | 0x50258, DRAM_REG_50258, d);
+    uint32_t reg502A4 = read_register(offset | 0x502A4, DRAM_REG_502A4, d);
 
     d->tcl     = bit_slice(reg50204, 5, 0);
     d->trcd_rd = bit_slice(reg50204, 21, 16);
     d->trcd_wr = bit_slice(reg50204, 29, 24);
-    if (d->trcd_wr == 0) d->trcd_wr = d->trcd_rd;
+    if (d->trcd_wr == 0 && dram_has(d, DRAM_REG_50204)) {
+        d->trcd_wr = d->trcd_rd;
+        d->trcd_wr_derived = true;
+    }
     d->tras    = bit_slice(reg50204, 14, 8);
     d->trp     = bit_slice(reg50208, 21, 16);
     d->trc     = bit_slice(reg50208, 7, 0);
@@ -96,7 +105,10 @@ static void read_common_timings(uint32_t offset, dram_timings_t *d)
     d->wtrl    = bit_slice(reg50214, 22, 16);
     d->tcwl    = bit_slice(reg50214, 5, 0);
     d->twr     = bit_slice(reg50218, 7, 0);
-    if (d->twr == 0) d->twr = d->wtrs;
+    if (d->twr == 0 && dram_has(d, DRAM_REG_50218)) {
+        d->twr = d->wtrs;
+        d->twr_derived = true;
+    }
 
     d->trc_page = bit_slice(reg5021C, 31, 20);
 
@@ -138,30 +150,36 @@ static void read_ddr5_timings(dram_timings_t *d)
     const uint32_t offset = 0; /* UMC0 */
 
     /* Ratio -> frequency */
-    uint32_t ratio_reg = read_smn(offset | 0x50200);
+    uint32_t ratio_reg = read_register(offset | 0x50200, DRAM_REG_RATIO, d);
     float ratio = bit_slice(ratio_reg, 15, 0) / 100.0f;
     float mem_freq = ratio * 200.0f;
-    d->frequency_hint_mhz = mem_freq;
+    d->data_rate_mts = mem_freq;
+    d->data_rate_info = (value_info_t){
+        dram_has(d, DRAM_REG_RATIO) && mem_freq > 0.0f, VALUE_SOURCE_SMN, VALUE_UNIT_MTS
+    };
 
     /* GDM, Cmd2T, PowerDown */
     d->gdm_enabled = bit_slice(ratio_reg, 18, 18) == 1;
     uint32_t cmd2t_bit = bit_slice(ratio_reg, 17, 17);
-    snprintf(d->cmd2t, sizeof(d->cmd2t), "%s", cmd2t_bit ? "2T" : "1T");
-    uint32_t refresh_reg = read_smn(offset | 0x5012C);
+    if (dram_has(d, DRAM_REG_RATIO))
+        snprintf(d->cmd2t, sizeof(d->cmd2t), "%s", cmd2t_bit ? "2T" : "1T");
+    uint32_t refresh_reg = read_register(offset | 0x5012C, DRAM_REG_REFRESH, d);
     d->power_down_enabled = bit_slice(refresh_reg, 28, 28) == 1;
 
     read_common_timings(offset, d);
 
     /* RFC - DDR5: choose first non-default from 4 registers */
     uint32_t trfc_regs[4];
-    trfc_regs[0] = read_smn(offset | 0x50260);
-    trfc_regs[1] = read_smn(offset | 0x50264);
-    trfc_regs[2] = read_smn(offset | 0x50268);
-    trfc_regs[3] = read_smn(offset | 0x5026C);
+    bool rfc_ok = true;
+    for (unsigned i = 0; i < 4; i++) {
+        bool ok = try_read_smn(offset | (0x50260 + 4 * i), &trfc_regs[i]);
+        rfc_ok = rfc_ok && ok;
+    }
     uint32_t trfc_reg = 0;
     for (int i = 0; i < 4; i++) {
         if (trfc_regs[i] != 0x00C00138) { trfc_reg = trfc_regs[i]; break; }
     }
+    if (rfc_ok && trfc_reg) d->available |= DRAM_VALUE_RFC;
     if (trfc_reg) {
         d->rfc  = bit_slice(trfc_reg, 15, 0);
         d->rfc2 = bit_slice(trfc_reg, 31, 16);
@@ -169,19 +187,18 @@ static void read_ddr5_timings(dram_timings_t *d)
 
     /* RFCsb */
     uint32_t rfcsb_regs[4];
-    rfcsb_regs[0] = bit_slice(read_smn(offset | 0x502C0), 10, 0);
-    rfcsb_regs[1] = bit_slice(read_smn(offset | 0x502C4), 10, 0);
-    rfcsb_regs[2] = bit_slice(read_smn(offset | 0x502C8), 10, 0);
-    rfcsb_regs[3] = bit_slice(read_smn(offset | 0x502CC), 10, 0);
-    for (int i = 0; i < 4; i++) {
+    bool rfcsb_ok = true;
+    for (unsigned i = 0; i < 4; i++) {
+        uint32_t value;
+        bool ok = try_read_smn(offset | (0x502C0 + 4 * i), &value);
+        rfcsb_ok = rfcsb_ok && ok;
+        rfcsb_regs[i] = bit_slice(value, 10, 0);
+    }
+    for (unsigned i = 0; i < 4; i++) {
         if (rfcsb_regs[i] != 0) { d->rfcsb = rfcsb_regs[i]; break; }
     }
-
-    /* Nanosecond conversions */
-    d->trefi_ns  = to_nanoseconds(d->refi, mem_freq);
-    d->trfc_ns   = to_nanoseconds(d->rfc, mem_freq);
-    d->trfc2_ns  = to_nanoseconds(d->rfc2, mem_freq);
-    d->trfcsb_ns = to_nanoseconds(d->rfcsb, mem_freq);
+    if (rfcsb_ok && d->rfcsb) d->available |= DRAM_VALUE_RFCSB;
+    convert_timings(d);
 }
 
 static void read_ddr4_timings(dram_timings_t *d)
@@ -195,17 +212,23 @@ static void read_ddr4_timings(dram_timings_t *d)
      *   - GDM:   bit 11
      */
     uint32_t ratio_reg;
-    bool ratio_io_ok = try_read_smn(offset | 0x50200, &ratio_reg);
+    ratio_reg = read_register(offset | 0x50200, DRAM_REG_RATIO, d);
+    bool ratio_io_ok = dram_has(d, DRAM_REG_RATIO);
     float ratio = (float)bit_slice(ratio_reg, 7, 0) / 3.0f;
     float mem_freq = ratio * 200.0f;
-    d->frequency_hint_mhz = mem_freq;
+    d->data_rate_mts = mem_freq;
+    d->data_rate_info = (value_info_t){
+        dram_has(d, DRAM_REG_RATIO) && mem_freq > 0.0f, VALUE_SOURCE_SMN, VALUE_UNIT_MTS
+    };
     d->ddr4_ratio_available = ratio_io_ok && ratio > 0.0f;
 
     uint32_t cmd2t_bit = bit_slice(ratio_reg, 10, 10);
-    snprintf(d->cmd2t, sizeof(d->cmd2t), "%s", cmd2t_bit ? "2T" : "1T");
+    if (dram_has(d, DRAM_REG_RATIO))
+        snprintf(d->cmd2t, sizeof(d->cmd2t), "%s", cmd2t_bit ? "2T" : "1T");
     d->gdm_enabled = bit_slice(ratio_reg, 11, 11) == 1;
     uint32_t refresh_reg;
-    d->ddr4_fgr_io_ok = try_read_smn(offset | 0x5012C, &refresh_reg);
+    refresh_reg = read_register(offset | 0x5012C, DRAM_REG_REFRESH, d);
+    d->ddr4_fgr_io_ok = dram_has(d, DRAM_REG_REFRESH);
     d->power_down_enabled = bit_slice(refresh_reg, 28, 28) == 1;
 
     read_common_timings(offset, d);
@@ -216,6 +239,7 @@ static void read_ddr4_timings(dram_timings_t *d)
     bool rfc1_io_ok = try_read_smn(offset | 0x50264, &trfc1);
     uint32_t trfc_reg = (trfc0 != trfc1) ? ((trfc0 != 0x21060138) ? trfc0 : trfc1) : trfc0;
     d->ddr4_rfc_available = rfc0_io_ok && rfc1_io_ok && trfc_reg != 0;
+    if (d->ddr4_rfc_available) d->available |= DRAM_VALUE_RFC;
     if (trfc_reg) {
         d->rfc  = bit_slice(trfc_reg, 10, 0);
         d->rfc2 = bit_slice(trfc_reg, 21, 11);
@@ -223,28 +247,16 @@ static void read_ddr4_timings(dram_timings_t *d)
     }
     d->fgr = bit_slice(refresh_reg, 18, 16);
 
-    /* mem_freq is the effective DDR4 data rate in MT/s, not MCLK MHz.
-     * Do not halve the result below 2000 MT/s. Keep the DDR5 path unchanged.
-     * These are the three programmed timings, not an instantaneous FGR mode. */
-    if (mem_freq > 0.0f) {
-        const float ns_per_clock = 2000.0f / mem_freq;
-        d->trefi_ns = (float)d->refi * ns_per_clock;
-        d->trfc_ns = (float)d->rfc * ns_per_clock;
-        d->trfc2_ns = (float)d->rfc2 * ns_per_clock;
-        d->trfc4_ns = (float)d->rfc4 * ns_per_clock;
-    }
+    convert_timings(d);
 }
 
-void dram_read_timings(int codename_index, dram_timings_t *out)
+dram_layout_t dram_layout_for_codename(int codename_index)
 {
-    memset(out, 0, sizeof(*out));
     switch (codename_index) {
     case 20: case 21: /* Raphael (Ryzen 7000), Phoenix (Ryzen 7040/8040) — Zen4 DDR5 */
     case 22: case 24: /* Strix Point / Hawk Point — Zen5/Zen4c DDR5 */
     case 23:          /* Granite Ridge (Ryzen 9000) — Zen5 DDR5 */
-        out->layout = DRAM_LAYOUT_DDR5;
-        read_ddr5_timings(out);
-        break;
+        return DRAM_LAYOUT_DDR5;
     case 2:  /* Renoir (APU, DDR4/LPDDR4) */
     case 3:  /* Picasso (APU, DDR4) */
     case 7:  /* Raven Ridge (APU, DDR4) */
@@ -254,10 +266,16 @@ void dram_read_timings(int codename_index, dram_timings_t *out)
     case 17: /* Lucienne (APU, DDR4/LPDDR4) */
     case 4: case 9: case 10: case 12: case 18: case 19:
         /* Matisse, Summit, Pinnacle, Vermeer, Naples, Chagall (DDR4) */
-        out->layout = DRAM_LAYOUT_DDR4;
-        read_ddr4_timings(out);
-        break;
+        return DRAM_LAYOUT_DDR4;
     default:
-        break;
+        return DRAM_LAYOUT_NONE;
     }
+}
+
+void dram_read_timings(int codename_index, dram_timings_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->layout = dram_layout_for_codename(codename_index);
+    if (out->layout == DRAM_LAYOUT_DDR4) read_ddr4_timings(out);
+    else if (out->layout == DRAM_LAYOUT_DDR5) read_ddr5_timings(out);
 }

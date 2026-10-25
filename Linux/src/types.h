@@ -15,6 +15,32 @@ typedef enum { RANK_SR, RANK_DR, RANK_QR } mem_rank_t;
 /* Decoder path, not certification of the physical memory type (e.g. LPDDR). */
 typedef enum { DRAM_LAYOUT_NONE, DRAM_LAYOUT_DDR4, DRAM_LAYOUT_DDR5 } dram_layout_t;
 
+/* Metadata describes the value presented, not hardware freshness. */
+typedef enum { VALUE_SOURCE_NONE, VALUE_SOURCE_SMN, VALUE_SOURCE_PM,
+               VALUE_SOURCE_SMBIOS, VALUE_SOURCE_MSR_ESTIMATE } value_source_t;
+typedef enum { VALUE_UNIT_NONE, VALUE_UNIT_MHZ, VALUE_UNIT_MTS } value_unit_t;
+typedef struct {
+    bool available;
+    value_source_t source;
+    value_unit_t unit;
+} value_info_t;
+typedef enum { MEMORY_TYPE_UNKNOWN, MEMORY_TYPE_CONSISTENT,
+               MEMORY_TYPE_INCOMPLETE, MEMORY_TYPE_CONFLICT } memory_type_state_t;
+
+/* Per-register userspace I/O status, shared by the known DRAM layouts. */
+typedef enum {
+    DRAM_REG_50204 = 1u << 0,  DRAM_REG_50208 = 1u << 1,
+    DRAM_REG_5020C = 1u << 2,  DRAM_REG_50210 = 1u << 3,
+    DRAM_REG_50214 = 1u << 4,  DRAM_REG_50218 = 1u << 5,
+    DRAM_REG_5021C = 1u << 6,  DRAM_REG_50220 = 1u << 7,
+    DRAM_REG_50224 = 1u << 8,  DRAM_REG_50228 = 1u << 9,
+    DRAM_REG_50230 = 1u << 10, DRAM_REG_50234 = 1u << 11,
+    DRAM_REG_50250 = 1u << 12, DRAM_REG_50254 = 1u << 13,
+    DRAM_REG_50258 = 1u << 14, DRAM_REG_502A4 = 1u << 15,
+    DRAM_REG_RATIO = 1u << 16, DRAM_REG_REFRESH = 1u << 17,
+    DRAM_VALUE_RFC = 1u << 18, DRAM_VALUE_RFCSB = 1u << 19
+} dram_source_mask_t;
+
 typedef enum {
     DIMM_TEMP_UNASSOCIATED, DIMM_TEMP_IDENTITY_MISSING, DIMM_TEMP_AMBIGUOUS,
     DIMM_TEMP_SPD_UNAVAILABLE, DIMM_TEMP_INCOMPATIBLE, DIMM_TEMP_INVENTORY_INCOMPLETE,
@@ -28,7 +54,8 @@ typedef struct {
     char part_number[STR_LEN];
     char serial_number[STR_LEN];
     uint64_t capacity_bytes;
-    uint32_t clock_speed_mhz;
+    uint32_t configured_speed; /* SMBIOS numeric value, unit kept separately */
+    value_unit_t configured_speed_unit;
     mem_rank_t rank;
     mem_type_t type; /* SMBIOS Type, independent of CPU codename */
     dimm_temp_state_t temp_state;
@@ -43,7 +70,9 @@ typedef struct {
 
 typedef struct {
     float frequency;       /* MT/s */
+    value_info_t frequency_info;
     mem_type_t type;
+    memory_type_state_t type_state; /* SMBIOS consensus, never CPU codename */
     char total_capacity[32];
     char part_number[STR_LEN];
 } memory_config_t;
@@ -68,6 +97,7 @@ typedef struct {
     /* Power */
     float package_power_w; /* reserved — populated but not yet displayed */
     float ppt_w;
+    bool ppt_available;
     float package_current_a; /* reserved — populated but not yet displayed */
     /* Voltages */
     float vcore, vsoc, vddp, vddg_ccd, vddg_iod, vdd_misc;
@@ -75,6 +105,7 @@ typedef struct {
     float vid;
     /* Clocks */
     float core_clock_mhz, bclk_mhz; /* reserved */
+    value_info_t bclk_info;
     float fclk_mhz, uclk_mhz, mclk_mhz;
     float memory_clock_mhz; /* reserved */
     float core_clocks_ghz[MAX_CORES]; /* reserved */
@@ -125,7 +156,10 @@ typedef struct {
     /* Flags */
     bool gdm_enabled, power_down_enabled;
     char cmd2t[4];
-    float frequency_hint_mhz;
+    float data_rate_mts; /* Effective DDR rate, not MCLK MHz. */
+    value_info_t data_rate_info;
+    uint32_t available; /* dram_source_mask_t; never inferred from the value */
+    bool trcd_wr_derived, twr_derived; /* Existing zero substitutions */
     /* DDR4 refresh fields; zero for other memory types. FGR is the raw
      * 0x5012C[18:16] code, not a refresh multiplier or an I/O validity flag.
      * 0: normal; 1/2: fixed 2x/4x; 5/6: on-the-fly 1x/2x or 1x/4x.

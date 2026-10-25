@@ -60,6 +60,7 @@ size_t __wrap_fread(void *ptr, size_t size, size_t n, FILE *f)
     case 0x50260: v = rfc0; break;
     case 0x50264: v = rfc1; break;
     case 0x50230: v = 14040; break;
+    case 0x502C0: v = 160; break;
     }
     unsigned char *p = ptr;
     for (unsigned i = 0; i < 4; i++) p[i] = (unsigned char)(v >> (8 * i));
@@ -173,6 +174,7 @@ int main(void)
         fail_address = 0x50200;
         read_ddr4(&d);
         assert(!d.ddr4_ratio_available && d.ddr4_rfc_available && d.ddr4_fgr_io_ok);
+        assert(d.cmd2t[0] == '\0'); /* Failed flags must not claim 1T. */
         assert(d.rfc4 == 288 && d.trfc4_ns == 0);
         fail_address = 0x50260;
         read_ddr4(&d);
@@ -183,11 +185,84 @@ int main(void)
         assert(!d.ddr4_rfc_available && d.rfc == 630); /* Same selection, unavailable UI. */
         rfc0 = def; rfc1 = 0x480EA276;
     }
+    fail = FAIL_READ; fail_address = 0x50230;
+    read_ddr4(&d);
+    assert(d.trefi_ns == 0); /* Failed REFI cannot yield current nanoseconds. */
+    fail_open = 1;
+    dram_read_timings(20, &d);
+    assert(!d.cmd2t[0]);
+    fail_open = 0;
     fail = FAIL_NONE; refresh = 0; /* A successfully read zero is normal FGR. */
     read_ddr4(&d);
     assert(d.ddr4_fgr_io_ok && d.fgr == 0 && d.ddr4_rfc_available);
     assert(d.rfc4 == 288 && d.ddr4_ratio_available);
     near(d.trfc4_ns, 160);
+    /* Every common register keeps its own status on both decoder layouts.
+     * All-zero registers are successful reads, not unavailable data. */
+    const struct { uint32_t address, mask; } common[] = {
+        {0x50204, DRAM_REG_50204}, {0x50208, DRAM_REG_50208},
+        {0x5020C, DRAM_REG_5020C}, {0x50210, DRAM_REG_50210},
+        {0x50214, DRAM_REG_50214}, {0x50218, DRAM_REG_50218},
+        {0x5021C, DRAM_REG_5021C}, {0x50220, DRAM_REG_50220},
+        {0x50224, DRAM_REG_50224}, {0x50228, DRAM_REG_50228},
+        {0x50230, DRAM_REG_50230}, {0x50234, DRAM_REG_50234},
+        {0x50250, DRAM_REG_50250}, {0x50254, DRAM_REG_50254},
+        {0x50258, DRAM_REG_50258}, {0x502A4, DRAM_REG_502A4}
+    };
+    const int profiles[] = {2, 12, 20, 23};
+    for (unsigned p = 0; p < sizeof(profiles)/sizeof(*profiles); p++) {
+        bool ddr5_profile = profiles[p] >= 20;
+        ratio = ddr5_profile ? 3000 : 54;
+        rfc0 = ddr5_profile ? 480u | (260u << 16) : def;
+        fail = FAIL_NONE;
+        dram_read_timings(profiles[p], &d);
+        assert(d.data_rate_info.available && dram_has(&d, DRAM_VALUE_RFC));
+        assert(!d.tcl && dram_has(&d, DRAM_REG_50204));
+        assert(d.gdm_enabled == false && !strcmp(d.cmd2t, "1T"));
+        for (unsigned i = 0; i < sizeof(common)/sizeof(*common); i++) {
+            for (fail = FAIL_WRITE; fail <= FAIL_CLOSE; fail++) {
+                fail_address = common[i].address;
+                dram_read_timings(profiles[p], &d);
+                assert(!dram_has(&d, common[i].mask));
+                assert(dram_has(&d, common[(i+1)%16].mask));
+                assert(dram_has(&d, DRAM_VALUE_RFC) && d.data_rate_info.available);
+                if (common[i].address == 0x50230) assert(d.trefi_ns == 0);
+            }
+            fail = FAIL_NONE; /* Recovery cannot retain the previous failure. */
+            dram_read_timings(profiles[p], &d);
+            assert(dram_has(&d, common[i].mask));
+        }
+        if (ddr5_profile) {
+            const uint32_t deps[] = {0x50200,0x5012C,0x50260,0x50264,
+                0x50268,0x5026C,0x502C0,0x502C4,0x502C8,0x502CC};
+            for (unsigned i=0; i<sizeof(deps)/sizeof(*deps); i++) {
+                for (fail=FAIL_WRITE; fail<=FAIL_CLOSE; fail++) {
+                    fail_address=deps[i];
+                    dram_read_timings(profiles[p], &d);
+                    if (i == 0) {
+                        assert(!d.data_rate_info.available && !d.cmd2t[0]);
+                        assert(d.trfc_ns == 0 && d.trfcsb_ns == 0);
+                    } else if (i == 1) assert(!dram_has(&d, DRAM_REG_REFRESH));
+                    else if (i < 6) {
+                        assert(!dram_has(&d, DRAM_VALUE_RFC));
+                        assert(d.trfc_ns == 0 && dram_has(&d, DRAM_VALUE_RFCSB));
+                    } else assert(!dram_has(&d, DRAM_VALUE_RFCSB));
+                }
+            }
+            fail=FAIL_NONE; ratio=500; /* 1000 MT/s, no unit heuristic. */
+            dram_read_timings(profiles[p], &d);
+            near(d.trfc_ns,960);
+        }
+        fail=FAIL_NONE; ratio=0;
+        dram_read_timings(profiles[p], &d);
+        assert(dram_has(&d, DRAM_REG_RATIO) && !d.data_rate_info.available);
+        assert(!strcmp(d.cmd2t, "1T")); /* Flags valid even with a zero ratio. */
+        fail_open=1;
+        dram_read_timings(profiles[p], &d);
+        assert(!d.available && !d.data_rate_info.available && !d.cmd2t[0]);
+        fail_open=0;
+    }
+    assert(opened == closed);
     puts("DDR4 refresh I/O, FGR and decoder-route tests passed; no hardware access");
     return 0;
 }

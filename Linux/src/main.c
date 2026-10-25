@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "backend.h"
+#include "build_info.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +20,7 @@ static void on_signal(int sig)
 static int restore_env(int *argc, char ***argv)
 {
     int new_argc = 0;
-    char **new_argv = malloc(*argc * sizeof(char *));
+    char **new_argv = calloc((size_t)*argc + 1, sizeof(char *));
     if (!new_argv) return -1;
 
     for (int i = 0; i < *argc; i++) {
@@ -66,7 +67,7 @@ static void elevate_if_necessary(int argc, char **argv)
      * +1 extra for the conditional --env-GDK_BACKEND=wayland entry */
     int total = 2 + env_count + 1 + (argc - 1) + 1;
     char **new_argv = malloc(total * sizeof(char *));
-    if (!new_argv) return;
+    if (!new_argv) { perror("pkexec arguments"); exit(1); }
 
     int n = 0;
     new_argv[n++] = "pkexec";
@@ -74,33 +75,33 @@ static void elevate_if_necessary(int argc, char **argv)
     /* Get self path */
     char self[4096];
     ssize_t len = readlink("/proc/self/exe", self, sizeof(self) - 1);
-    if (len <= 0) { free(new_argv); return; }
+    if (len <= 0 || len == (ssize_t)sizeof(self) - 1) {
+        fprintf(stderr, "TuxTimings: cannot resolve the current executable\n");
+        free(new_argv);
+        exit(1);
+    }
     self[len] = '\0';
 
-    /* Prefer installed path for polkit policy match */
-    const char *installed = "/opt/TuxTimings/bin/tuxtimings";
-    if (access(installed, X_OK) == 0)
-        new_argv[n++] = (char *)installed;
-    else
-        new_argv[n++] = self;
+    /* Re-run the exact binary the user invoked, including a local build. */
+    new_argv[n++] = self;
 
-    /* Add env forwarding args */
-    char env_bufs[16][512];
+    /* Allocate to the actual size: session paths may exceed 512 bytes. */
+    char *env_bufs[16] = {0};
     int ei = 0;
     for (int i = 0; env_vars[i] && ei < 16; i++) {
         const char *val = getenv(env_vars[i]);
         if (val) {
-            snprintf(env_bufs[ei], sizeof(env_bufs[ei]), "--env-%s=%s", env_vars[i], val);
-            new_argv[n++] = env_bufs[ei];
-            ei++;
+            size_t size = strlen(env_vars[i]) + strlen(val) + sizeof("--env-=");
+            env_bufs[ei] = malloc(size);
+            if (!env_bufs[ei]) { perror("pkexec environment"); exit(1); }
+            snprintf(env_bufs[ei], size, "--env-%s=%s", env_vars[i], val);
+            new_argv[n++] = env_bufs[ei++];
         }
     }
 
-    /* If on Wayland, forward that hint */
-    if (getenv("WAYLAND_DISPLAY") && ei < 16) {
-        snprintf(env_bufs[ei], sizeof(env_bufs[ei]), "--env-GDK_BACKEND=wayland");
-        new_argv[n++] = env_bufs[ei++];
-    }
+    /* If on Wayland, forward that hint without shell word splitting. */
+    if (getenv("WAYLAND_DISPLAY"))
+        new_argv[n++] = "--env-GDK_BACKEND=wayland";
 
     /* Copy original args (skip argv[0]) */
     for (int i = 1; i < argc; i++)
@@ -121,7 +122,15 @@ int main(int argc, char *argv[])
     signal(SIGTERM, on_signal);
     signal(SIGINT,  on_signal);
 
-    restore_env(&argc, &argv);
+    if (restore_env(&argc, &argv) != 0) {
+        perror("TuxTimings arguments");
+        return 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        puts(TUXTIMINGS_BUILD_ID);
+        free(argv);
+        return 0;
+    }
     elevate_if_necessary(argc, argv);
 
     /* Force C locale for numeric formatting (dots, not commas) */

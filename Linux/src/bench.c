@@ -231,13 +231,34 @@ static double measure_latency_ns(size_t buf_bytes, long long min_accesses,
  * clflushopt is non-blocking (unlike clflush) so we issue all flushes
  * first, then a single sfence rather than serialising each one.
  */
+__attribute__((target("clflushopt")))
+static void flush_buffer_optimized(const void *ptr, size_t bytes)
+{
+    const char *p = ptr;
+    for (size_t i = 0; i < bytes; i += 64)
+        _mm_clflushopt((void *)(p + i));
+    _mm_sfence();
+}
+
+static void flush_buffer_legacy(const void *ptr, size_t bytes)
+{
+    const char *p = ptr;
+    for (size_t i = 0; i < bytes; i += 64)
+        _mm_clflush((const void *)(p + i));
+    _mm_mfence();
+}
+
+typedef void (*flush_implementation_t)(const void *, size_t);
+static flush_implementation_t select_flush_implementation(int has_clflushopt)
+{
+    return has_clflushopt ? flush_buffer_optimized : flush_buffer_legacy;
+}
+
 static void flush_buffer(const void *ptr, size_t bytes)
 {
-    const char *p   = (const char *)ptr;
-    const char *end = p + bytes;
-    for (; p < end; p += 64)
-        _mm_clflushopt((void *)p);
-    _mm_sfence();
+    /* CLFLUSH is supported by the Ryzen platforms targeted here. Keep the
+     * optional instruction confined to its own runtime-selected function. */
+    select_flush_implementation(__builtin_cpu_supports("clflushopt"))(ptr, bytes);
 }
 
 /* ── Multi-threaded bandwidth ─────────────────────────────────────────── */
@@ -311,7 +332,7 @@ static void do_copy_avx512(uint64_t *dst, const uint64_t *src, size_t n);
 __attribute__((optimize("O3,tree-vectorize")))
 static void do_read(const uint64_t *a, size_t n)
 {
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__AVX2__)
+#if defined(__GNUC__) || defined(__clang__)
     if (__builtin_cpu_supports("avx512f")) {
         do_read_avx512(a, n);
         return;
@@ -507,7 +528,7 @@ static void do_copy_avx512(uint64_t *dst, const uint64_t *src, size_t n)
 __attribute__((optimize("O3,tree-vectorize")))
 static void do_write(uint64_t *a, size_t n)
 {
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__AVX2__)
+#if defined(__GNUC__) || defined(__clang__)
     if (__builtin_cpu_supports("avx512f")) {
         do_write_avx512(a, n);
         return;
@@ -576,7 +597,7 @@ static void do_write(uint64_t *a, size_t n)
 __attribute__((optimize("O3,tree-vectorize")))
 static void do_copy(uint64_t *dst, const uint64_t *src, size_t n)
 {
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__AVX2__)
+#if defined(__GNUC__) || defined(__clang__)
     if (__builtin_cpu_supports("avx512f")) {
         do_copy_avx512(dst, src, n);
         return;

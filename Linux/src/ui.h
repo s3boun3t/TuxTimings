@@ -47,6 +47,7 @@ typedef struct {
 
     /* RAM tab — Footer */
     GtkWidget *lbl_footer_type;
+    GtkWidget *lbl_timing_source;
 
     /* CPU tab — VID & per-core voltages */
     GtkWidget *lbl_vid;

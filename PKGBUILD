@@ -7,21 +7,19 @@ pkgdesc="AMD Ryzen DRAM timings and CPU telemetry viewer (GTK4)"
 arch=('x86_64')
 url="https://github.com/Death4two/TuxTimings"
 license=('GPL3')
-makedepends=('gcc' 'pkgconf')
+makedepends=('gcc' 'pkgconf' 'gtk4' 'gmp')
 source=("$pkgbase-$pkgver.tar.gz::https://github.com/Death4two/TuxTimings/archive/refs/heads/main.tar.gz")
 sha256sums=('SKIP')
 
 build() {
     cd "$srcdir/TuxTimings-main/Linux"
-    # Run clean and build in separate make invocations to avoid
-    # parallel builds (`MAKEFLAGS=-j…`) deleting objects while linking.
-    make clean
-    make all
+    # Portable profile and shared embedded identity; no module build here.
+    make PROFILE=portable all
 }
 
 package_tuxtimings() {
     pkgdesc="AMD Ryzen DRAM timings and CPU telemetry viewer (GTK4)"
-    depends=('gtk4')
+    depends=('gtk4' 'gmp' 'polkit' 'dmidecode' 'kmod')
     optdepends=(
         'tuxtimings-dkms: kernel modules for accurate benchmarking and memory voltages'
         'ryzen_smu-dkms-git: kernel module for reading AMD SMN/PM tables'
@@ -32,6 +30,8 @@ package_tuxtimings() {
 
     # Binary
     install -Dm755 tuxtimings "$pkgdir/opt/TuxTimings/bin/tuxtimings"
+
+    install -Dm644 build/build-info.txt "$pkgdir/usr/share/doc/tuxtimings/build-info.txt"
 
     # Icon
     install -Dm644 tuxtimings.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/tuxtimings.png"
@@ -72,19 +72,8 @@ DESKTOP
     # Launcher script (handles env forwarding through pkexec)
     install -Dm755 /dev/stdin "$pkgdir/usr/bin/tuxtimings" << 'LAUNCHER'
 #!/bin/bash
-if [ "$(id -u)" -eq 0 ]; then
-    exec /opt/TuxTimings/bin/tuxtimings "$@"
-fi
-
-ENV_ARGS=""
-for VAR in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XAUTHORITY \
-           DBUS_SESSION_BUS_ADDRESS XDG_CONFIG_HOME HOME; do
-    eval VAL=\$$VAR
-    [ -n "$VAL" ] && ENV_ARGS="$ENV_ARGS --env-$VAR=$VAL"
-done
-[ -n "$WAYLAND_DISPLAY" ] && ENV_ARGS="$ENV_ARGS --env-GDK_BACKEND=wayland"
-
-exec pkexec /opt/TuxTimings/bin/tuxtimings $ENV_ARGS "$@"
+# The executable handles --version and its own elevation with exact argv.
+exec /opt/TuxTimings/bin/tuxtimings "$@"
 LAUNCHER
 }
 
@@ -96,20 +85,6 @@ package_tuxtimings-dkms() {
 
     cd "$srcdir/TuxTimings-main/Linux"
 
-    # aod-voltages DKMS module source
-    local aod_ver
-    aod_ver=$(grep '^PACKAGE_VERSION=' src/aod-voltages/dkms.conf | cut -d= -f2 | tr -d '"')
-    install -dm755 "$pkgdir/usr/src/aod-voltages-$aod_ver"
-    install -Dm644 src/aod-voltages/aod_voltages.c  "$pkgdir/usr/src/aod-voltages-$aod_ver/aod_voltages.c"
-    install -Dm644 src/aod-voltages/Makefile         "$pkgdir/usr/src/aod-voltages-$aod_ver/Makefile"
-    install -Dm644 src/aod-voltages/dkms.conf        "$pkgdir/usr/src/aod-voltages-$aod_ver/dkms.conf"
-
-    # tuxbench DKMS module source
-    local tb_ver
-    tb_ver=$(grep '^PACKAGE_VERSION=' src/tuxbench/dkms.conf | cut -d= -f2 | tr -d '"')
-    install -dm755 "$pkgdir/usr/src/tuxbench-$tb_ver"
-    install -Dm644 src/tuxbench/tuxbench.c   "$pkgdir/usr/src/tuxbench-$tb_ver/tuxbench.c"
-    install -Dm644 src/tuxbench/tuxbench.h   "$pkgdir/usr/src/tuxbench-$tb_ver/tuxbench.h"
-    install -Dm644 src/tuxbench/Makefile     "$pkgdir/usr/src/tuxbench-$tb_ver/Makefile"
-    install -Dm644 src/tuxbench/dkms.conf    "$pkgdir/usr/src/tuxbench-$tb_ver/dkms.conf"
+    # Shared staging recipe includes every local header; no module is built here.
+    bash tools/stage-dkms.sh "$pkgdir/usr/src"
 }

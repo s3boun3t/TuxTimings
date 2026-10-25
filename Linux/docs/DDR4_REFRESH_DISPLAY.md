@@ -26,3 +26,12 @@ The recorded Vermeer case remains 630 / 468 / 288 cycles and
 Memory-specific rows follow the decoder path: tRFC4/FGR for DDR4 and tRFCsb
 for DDR5. This route describes the decoder used, not independent physical
 memory detection or certification for LPDDR variants.
+
+
+The same per-register userspace I/O policy now covers common timings and the
+DDR5 decoder. Failed flags, cycle values and dependent nanosecond conversions
+show unavailable; successfully read zero and false remain distinct. Both
+layouts use explicit effective MT/s for conversion, without the previous DDR5
+unit heuristic below 2000 MT/s. RFC selection and the recorded DDR4 capture
+remain unchanged. See [value provenance and software fixtures](VALUES_VALIDATION.md)
+and [transport limitations](SMN_TRANSPORT.md).

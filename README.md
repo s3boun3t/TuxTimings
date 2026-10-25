@@ -14,7 +14,7 @@ If your CPU family is not listed or shows incomplete readings, you can help by r
 
 ### Prerequisites
 
-- **[ryzen_smu](https://github.com/amkillam/ryzen_smu/)** kernel module — required for all readings. Install it separately; TuxTimings will load/unload it automatically if present.
+- **[ryzen_smu](https://github.com/amkillam/ryzen_smu/)** kernel module — required for all readings. Install it separately. TuxTimings can request loading it when starting; it leaves shared modules loaded on exit.
 - **GTK4 runtime** — needed to run the application  
   - Arch: `gtk4`  
   - Debian/Ubuntu: `libgtk-4-1`
@@ -23,7 +23,7 @@ If your CPU family is not listed or shows incomplete readings, you can help by r
 > - Arch: `gtk4` + `gmp`  
 > - Debian/Ubuntu: `libgtk-4-dev` + `libgmp-dev`
 
-> **Note:** TuxTimings automatically loads `ryzen_smu` and `aod_voltages` on startup and unloads them on exit. No manual `modprobe` is needed.
+> **Module lifecycle:** The application can request `ryzen_smu`, `aod_voltages`, sensor drivers and optional `tuxbench` at startup. Shared SMU/AOD/JC42/SPD5118 drivers remain loaded on exit. Only a `tuxbench` module loaded by this application is eligible for removal. Installation scripts manage DKMS separately; compiling or staging sources does not load a module.
 
 ### Installing
 
@@ -71,7 +71,7 @@ Builds from source and installs to `/opt/TuxTimings/` with a launcher at `/usr/b
 
 #### From a git clone (recommended)
 
-Update your local clone to the latest `main`, then rebuild/reinstall:
+Fast-forward the current branch from its configured upstream, then rebuild/reinstall:
 
 ```bash
 ./update.sh
@@ -79,9 +79,10 @@ Update your local clone to the latest `main`, then rebuild/reinstall:
 ```
 
 Notes:
-- `./update.sh` force-updates tracked repo files to match the latest `origin/main` (overwrites local edits).
-- By default it also removes untracked files/dirs (build artifacts, local `.deb` output, etc).
-- Add `--keep-untracked` to preserve untracked files/dirs.
+- `./update.sh` keeps the current branch and only accepts a fast-forward from its configured upstream.
+- Tracked edits, staged edits, untracked files (including ignored build outputs), divergence, detached HEAD and a missing upstream stop the update. Save your work explicitly before retrying.
+- No reset, branch switch, stash or cleanup is performed. `--keep-untracked` remains accepted for compatibility; preservation is always enabled.
+- Fetching may update remote-tracking references before a divergent history is refused. Existing worktree files and local commits are preserved.
 
 #### Stable builds (tags / releases)
 
@@ -91,8 +92,38 @@ For a reproducible/stable build, download the source files from the latest stabl
 
 ```bash
 make -C Linux
-sudo ./Linux/tuxtimings
+./Linux/tuxtimings --version
+./Linux/tuxtimings
 ```
+
+The installer builds as the invoking user even when started through `sudo` (using `runuser` with separate arguments); root without a real invoking user must build unprivileged first. Generated build headers and manifests are readable for packaging.
+
+The local executable elevates itself using its own resolved path. Running a local build never silently substitutes `/opt/TuxTimings/bin/tuxtimings`. The installed launcher delegates to that installed binary; `--version` requires neither elevation nor hardware access. Arguments and session environment values are forwarded as individual arguments, including spaces.
+
+`VERSION` supplies the release base. Builds embed the Git revision, clean/dirty state and compilation profile; an archive without `.git` is explicitly marked `archive` with an unknown revision. The same identity appears in the UI, `--version`, diagnostic reports and packaged `usr/share/doc/tuxtimings/build-info.txt`. Debian package versions derive from this build metadata; Arch retains its release package version and carries the exact build identity in the manifest. A dirty marker is not a cryptographic identifier of every local edit.
+
+The default `PROFILE=portable` compiles for baseline x86-64 with generic tuning. CLFLUSHOPT is confined to a runtime-selected function with a CLFLUSH fallback, and AVX-512 benchmark kernels retain runtime detection. An explicit `make -C Linux PROFILE=native` enables host-specific optimization for local use. Build-profile changes trigger recompilation. Software compilation and dispatch fixtures do not establish benchmark performance or hardware support across every AMD system; the optional tuxbench kernel module has a separate build and instruction profile.
+
+To inspect DKMS source contents without installing or loading anything:
+
+```bash
+./install.sh --stage-dkms /tmp/tuxtimings-dkms-sources
+python3 Linux/tests/test_delivery.py
+```
+
+The staging recipe is shared by the direct installer and `PKGBUILD`, and includes local module headers such as `aod_aml.h`. Delivery tests use temporary trees, a local Git remote and fake `pkexec`; the Debian fixture builds and extracts a package without installing it. Packaging refuses to overwrite an existing package of the same name.
+
+### Software validation
+
+`make -B -C Linux/tests check` runs the synthetic suites, including delivery
+fixtures in temporary directories. `make -C Linux/tests check-ui` additionally
+requires a working GTK display; it substitutes the backend and benchmarks.
+Set `UI_CAPTURE_DIR=/chosen/path` to retain PNGs and a build/scenario manifest
+in a unique subdirectory; temporary captures are removed by default.
+See [value provenance and validation](Linux/docs/VALUES_VALIDATION.md),
+[DDR4 decoder audit](Linux/docs/DDR4_DECODER_AUDIT.md) and
+[SMN transport limits](Linux/docs/SMN_TRANSPORT.md). These tests do not certify
+hardware readings or authorize module loading and firmware calls.
 
 ### License
 

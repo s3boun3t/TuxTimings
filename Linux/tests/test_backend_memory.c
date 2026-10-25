@@ -47,8 +47,11 @@ static void test_types(void)
 {
     parse_fixture("Memory Device\n\tSize: 8 GB\n\tType: DDR4\n"
                   "\tType Detail: Synchronous Unbuffered\n\tLocator: DIMM_A2\n"
+                  "\tConfigured Memory Speed: 3600 MT/s\n"
                   "\tSerial Number: 00000000\n\tPart Number: SAME-PART\n", true);
     assert(s_module_count == 1 && s_modules[0].type == MEM_DDR4);
+    assert(s_modules[0].configured_speed == 3600);
+    assert(s_modules[0].configured_speed_unit == VALUE_UNIT_MTS);
     assert(!s_modules[0].serial_number[0] && s_module_inventory_complete);
     assert(s_modules[0].capacity_bytes == 8ULL * 1024 * 1024 * 1024);
     assert(!strcmp(s_modules[0].capacity_display, "8.0 GiB"));
@@ -114,12 +117,38 @@ static void test_overflow(void)
     assert(s_module_count == MAX_MODULES && !s_module_inventory_complete);
 }
 
+static void test_frequency_chain(void)
+{
+    memory_config_t c;
+    dram_timings_t d = {.layout=DRAM_LAYOUT_DDR5};
+    parse_fixture("Memory Device\n\tSize: 16 GB\n\tType: DDR5\n"
+                  "\tConfigured Memory Speed: 6000 MT/s\n", true);
+    memory_config_resolve(&c, s_modules, s_module_count, s_module_inventory_complete, &d, 3000);
+    assert(c.type == MEM_DDR5 && c.frequency == 6000);
+    assert(c.frequency_info.source == VALUE_SOURCE_SMBIOS);
+    parse_fixture("Memory Device\n\tSize: 16 GB\n\tType: DDR5\n"
+                  "\tConfigured Clock Speed: 3000 MHz\n", true);
+    assert(s_modules[0].configured_speed_unit == VALUE_UNIT_MHZ);
+    memory_config_resolve(&c, s_modules, s_module_count, s_module_inventory_complete, &d, 3000);
+    assert(c.frequency == 6000 && c.frequency_info.source == VALUE_SOURCE_PM);
+    parse_fixture("Memory Device\n\tSize: 16 GB\n\tType: LPDDR5\n"
+                  "\tConfigured Memory Speed: Unknown\n", true);
+    memory_config_resolve(&c, s_modules, s_module_count, s_module_inventory_complete, &d, 3000);
+    assert(c.type == MEM_LPDDR5 && !c.frequency_info.available);
+    parse_fixture("Memory Device\n\tSize: 16 GB\n\tType: DDR4\n"
+                  "\tConfigured Memory Speed: 3200 nonsense\n", true);
+    assert(s_modules[0].configured_speed_unit == VALUE_UNIT_NONE);
+    memory_config_resolve(&c, s_modules, s_module_count, s_module_inventory_complete, &d, 0);
+    assert(!c.frequency_info.available);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 1 || !strcmp(argv[1], "types")) test_types();
     if (argc == 1 || !strcmp(argv[1], "sizes")) test_sizes();
     if (argc == 1 || !strcmp(argv[1], "commands")) test_commands();
     if (argc == 1 || !strcmp(argv[1], "overflow")) test_overflow();
+    if (argc == 1 || !strcmp(argv[1], "frequency")) test_frequency_chain();
     puts("SMBIOS memory tests passed; no commands or hardware accessed");
     return 0;
 }

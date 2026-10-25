@@ -6,6 +6,7 @@
 #   ./install.sh              Build and install to system
 #   ./install.sh --uninstall  Remove all installed files
 #   ./install.sh --deb        Build a .deb package (Ubuntu/Debian)
+#   ./install.sh --stage-dkms DIR  Copy DKMS sources without installing
 #
 # On Arch-based distros, prefer:  makepkg -si  (from the repo root)
 set -e
@@ -15,8 +16,28 @@ LINUX_DIR="$ROOT_DIR/Linux"
 INSTALL_DIR="/opt/TuxTimings"
 MAKE=/usr/bin/make
 
+# Source staging is deliberately available before any build, elevation or install.
+if [ "${1:-}" = "--stage-dkms" ]; then
+    [ "$#" -eq 2 ] || { echo "Usage: $0 --stage-dkms DESTINATION" >&2; exit 2; }
+    exec bash "$LINUX_DIR/tools/stage-dkms.sh" "$2"
+fi
+
 REAL_USER="${SUDO_USER:-$(whoami)}"
 REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+
+build_application() {
+    if [ "$(id -u)" -eq 0 ]; then
+        if [ "$REAL_USER" = root ]; then
+            echo "Build as an unprivileged user before installing; no real sudo user was provided." >&2
+            return 1
+        fi
+        # Preserve the source owner's build identity and writable build files.
+        # runuser receives argv directly; paths and arguments are not shell code.
+        runuser -u "$REAL_USER" -- "$MAKE" -C "$LINUX_DIR" PROFILE=portable all
+    else
+        "$MAKE" -C "$LINUX_DIR" PROFILE=portable all
+    fi
+}
 
 if [ ! -f "$LINUX_DIR/Makefile" ]; then
     echo "ERROR: Linux/Makefile not found. Run this script from the repo root."
@@ -92,30 +113,15 @@ fi
 if [ "${1:-}" = "--deb" ]; then
     echo "==> Building .deb package..."
 
-    # Build binary first
-    if [ "$(id -u)" -eq 0 ]; then
-        su "$REAL_USER" -c "'$MAKE' -C '$LINUX_DIR' clean all"
-    else
-        "$MAKE" -C "$LINUX_DIR" clean all
-    fi
-
-    # Prefer a version derived from git tags when available, otherwise fall back
-    # to a stable placeholder.
-    PKG_VERSION="0.0.0"
-    if command -v git >/dev/null 2>&1 && git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        # Examples:
-        #   v1.2.3          -> 1.2.3
-        #   v1.2.3-5-g<sha> -> 1.2.3+5.g<sha>
-        ver="$(git -C "$ROOT_DIR" describe --tags --always --dirty 2>/dev/null || true)"
-        ver="${ver#v}"
-        # Debian version: allow [0-9A-Za-z.+~:-]
-        # Translate git-describe output into something dpkg accepts.
-        ver="${ver//-/.}"      # separators
-        ver="${ver//_/.}"      # safety
-        PKG_VERSION="${ver//.g/+g}"  # "…+g<sha>" instead of "…g<sha>"
-    fi
-    DEB_ROOT="$LINUX_DIR/deb-build/tuxtimings_${PKG_VERSION}_amd64"
-    rm -rf "$LINUX_DIR/deb-build"
+    # Compile without installation; package metadata comes from this exact build.
+    build_application
+    PKG_VERSION=$(sed -n 's/^Version: //p' "$LINUX_DIR/build/build-info.txt")
+    [ -n "$PKG_VERSION" ] || { echo "Missing build identity" >&2; exit 1; }
+    DEB_WORK=$(mktemp -d "${TMPDIR:-/tmp}/tuxtimings-deb.XXXXXX")
+    trap 'rm -rf -- "$DEB_WORK"' EXIT
+    DEB_ROOT="$DEB_WORK/tuxtimings_${PKG_VERSION}_amd64"
+    OUTPUT_DEB="$ROOT_DIR/tuxtimings_${PKG_VERSION}_amd64.deb"
+    [ ! -e "$OUTPUT_DEB" ] || { echo "Refusing to replace $OUTPUT_DEB" >&2; exit 1; }
     mkdir -p "$DEB_ROOT/DEBIAN"
     mkdir -p "$DEB_ROOT/opt/TuxTimings/bin"
     mkdir -p "$DEB_ROOT/usr/bin"
@@ -144,17 +150,8 @@ EOF
     # Launcher script
     cat > "$DEB_ROOT/usr/bin/tuxtimings" << 'LAUNCHER'
 #!/bin/bash
-if [ "$(id -u)" -eq 0 ]; then
-    exec /opt/TuxTimings/bin/tuxtimings "$@"
-fi
-ENV_ARGS=""
-for VAR in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XAUTHORITY \
-           DBUS_SESSION_BUS_ADDRESS XDG_CONFIG_HOME HOME; do
-    eval VAL=\$$VAR
-    [ -n "$VAL" ] && ENV_ARGS="$ENV_ARGS --env-$VAR=$VAL"
-done
-[ -n "$WAYLAND_DISPLAY" ] && ENV_ARGS="$ENV_ARGS --env-GDK_BACKEND=wayland"
-exec pkexec /opt/TuxTimings/bin/tuxtimings $ENV_ARGS "$@"
+# The executable handles --version and its own elevation with exact argv.
+exec /opt/TuxTimings/bin/tuxtimings "$@"
 LAUNCHER
     chmod 755 "$DEB_ROOT/usr/bin/tuxtimings"
 
@@ -196,9 +193,8 @@ DESKTOP
         install -m644 "$LINUX_DIR/tuxtimings.png" "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/tuxtimings.png"
     fi
 
-    dpkg-deb --build "$DEB_ROOT"
-    mv "$DEB_ROOT.deb" "$ROOT_DIR/"
-    rm -rf "$LINUX_DIR/deb-build"
+    install -Dm644 "$LINUX_DIR/build/build-info.txt" "$DEB_ROOT/usr/share/doc/tuxtimings/build-info.txt"
+    dpkg-deb --build --root-owner-group "$DEB_ROOT" "$OUTPUT_DEB"
     echo "==> .deb package created: $ROOT_DIR/tuxtimings_${PKG_VERSION}_amd64.deb"
     echo "    Install with: sudo dpkg -i tuxtimings_${PKG_VERSION}_amd64.deb"
     exit 0
@@ -216,11 +212,7 @@ fi
 if [ "$INSTALL_ONLY" -eq 0 ]; then
 
 echo "==> Building tuxtimings (C/GTK4)..."
-if [ "$(id -u)" -eq 0 ]; then
-    su "$REAL_USER" -c "'$MAKE' -C '$LINUX_DIR' clean all"
-else
-    "$MAKE" -C "$LINUX_DIR" clean all
-fi
+build_application
 
 fi # end INSTALL_ONLY check
 
@@ -237,21 +229,13 @@ echo "==> Installing TuxTimings to system..."
 mkdir -p "$INSTALL_DIR/bin"
 cp "$LINUX_DIR/tuxtimings" "$INSTALL_DIR/bin/"
 chmod +x "$INSTALL_DIR/bin/tuxtimings"
+install -m644 "$LINUX_DIR/build/build-info.txt" "$INSTALL_DIR/build-info.txt"
 
 # Launcher script in PATH
 cat > /usr/bin/tuxtimings << 'LAUNCHER'
 #!/bin/bash
-if [ "$(id -u)" -eq 0 ]; then
-    exec /opt/TuxTimings/bin/tuxtimings "$@"
-fi
-ENV_ARGS=""
-for VAR in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XAUTHORITY \
-           DBUS_SESSION_BUS_ADDRESS XDG_CONFIG_HOME HOME; do
-    eval VAL=\$$VAR
-    [ -n "$VAL" ] && ENV_ARGS="$ENV_ARGS --env-$VAR=$VAL"
-done
-[ -n "$WAYLAND_DISPLAY" ] && ENV_ARGS="$ENV_ARGS --env-GDK_BACKEND=wayland"
-exec pkexec /opt/TuxTimings/bin/tuxtimings $ENV_ARGS "$@"
+# The executable handles --version and its own elevation with exact argv.
+exec /opt/TuxTimings/bin/tuxtimings "$@"
 LAUNCHER
 chmod +x /usr/bin/tuxtimings
 
@@ -350,7 +334,7 @@ install_aod_voltages() {
 
     local DKMS_SRC="/usr/src/aod-voltages-$AOD_VER"
     mkdir -p "$DKMS_SRC"
-    cp "$AOD_SRC/dkms.conf" "$AOD_SRC/Makefile" "$AOD_SRC"/*.c "$DKMS_SRC/"
+    bash "$LINUX_DIR/tools/stage-dkms.sh" --module "$AOD_SRC" "$DKMS_SRC"
 
     if dkms add aod-voltages/"$AOD_VER" 2>/dev/null || true; then
         if dkms build aod-voltages/"$AOD_VER" && dkms install aod-voltages/"$AOD_VER"; then
@@ -384,7 +368,7 @@ install_tuxbench() {
 
     local DKMS_SRC="/usr/src/tuxbench-$TB_VER"
     mkdir -p "$DKMS_SRC"
-    cp "$TB_SRC/dkms.conf" "$TB_SRC/Makefile" "$TB_SRC"/*.c "$TB_SRC"/*.h "$DKMS_SRC/"
+    bash "$LINUX_DIR/tools/stage-dkms.sh" --module "$TB_SRC" "$DKMS_SRC"
 
     # Remove all versions except the current one so fresh source is always built
     rmmod tuxbench 2>/dev/null || true

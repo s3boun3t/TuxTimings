@@ -2,16 +2,17 @@
 #include "backend.h"
 #include "dram.h"
 #include "dimm_sensors.h"
+#include "memory_config.h"
+#include "build_info.h"
 #include "bench.h"
 #include "pi_bench.h"
 #include <stdio.h>
 #include <string.h>
 #include <locale.h>
 #include <unistd.h>
+#include <math.h>
 
 /* ── CSS theme (GitHub dark) ────────────────────────────────────────── */
-
-#define APP_VERSION "v1.0.5"
 
 /* float→double promotion in variadic snprintf calls is harmless here */
 #pragma GCC diagnostic ignored "-Wdouble-promotion"
@@ -75,6 +76,8 @@ static GtkWidget *make_label(const char *text, const char *css_class)
     GtkWidget *l = gtk_label_new(text);
     gtk_widget_add_css_class(l, css_class);
     gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(l), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(l), PANGO_WRAP_WORD_CHAR);
     gtk_widget_set_hexpand(l, FALSE);
     return l;
 }
@@ -84,6 +87,9 @@ static GtkWidget *make_value(const char *text)
     GtkWidget *l = gtk_label_new(text);
     gtk_widget_add_css_class(l, "value-highlight");
     gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(l), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(l), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(l), 32);
     gtk_widget_set_hexpand(l, TRUE);
     return l;
 }
@@ -122,11 +128,26 @@ static GtkWidget *make_section_box(void)
     return frame;
 }
 
+static void set_timing(GtkWidget *label, const dram_timings_t *d,
+                       uint32_t value, uint32_t dependencies)
+{
+    if (dram_has(d, dependencies)) set_label_fmt(label, "%u", value);
+    else set_label_text(label, "—");
+}
+
+static void set_clock(GtkWidget *label, float mhz, const char *format)
+{
+    if (isfinite(mhz) && mhz > 0.0f) set_label_fmt(label, format, mhz);
+    else set_label_text(label, "—");
+}
+
 /* ── Build RAM tab ──────────────────────────────────────────────────── */
 
 static GtkWidget *build_ram_tab(app_widgets_t *w)
 {
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    /* Keep three timing columns readable; a narrow window scrolls the tab. */
+    gtk_widget_set_size_request(vbox, 780, -1);
     gtk_widget_set_margin_top(vbox, 8);
     gtk_widget_set_margin_start(vbox, 8);
     gtk_widget_set_margin_end(vbox, 8);
@@ -225,6 +246,9 @@ static GtkWidget *build_ram_tab(app_widgets_t *w)
     gtk_box_append(GTK_BOX(top), volt_box);
     gtk_box_append(GTK_BOX(vbox), top);
 
+    w->lbl_timing_source = make_label("Timings: UMC0", "footer-muted");
+    gtk_box_append(GTK_BOX(vbox), w->lbl_timing_source);
+
     /* ── Timing columns: Primary | Secondary | Tertiary ── */
     GtkWidget *mid = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_widget_set_hexpand(mid, TRUE);
@@ -318,9 +342,9 @@ static GtkWidget *build_ram_tab(app_widgets_t *w)
 
     /* Footer */
     GtkWidget *footer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    GtkWidget *footer_text = make_label("DRAM timings & MCLK/UCLK: SMN. Voltages & FCLK: PM table.", "footer-muted");
+    GtkWidget *footer_text = make_label("MCLK/FCLK/UCLK: PM. BCLK: configuration / estimate. Voltages: PM / firmware.", "footer-muted");
     gtk_widget_set_hexpand(footer_text, TRUE);
-    w->lbl_footer_type = make_label("DDR5", "value-highlight");
+    w->lbl_footer_type = make_label("—", "value-highlight");
     gtk_box_append(GTK_BOX(footer), footer_text);
     gtk_box_append(GTK_BOX(footer), w->lbl_footer_type);
     gtk_widget_set_margin_top(footer, 8);
@@ -412,7 +436,7 @@ static void refresh_rfc_ui(app_widgets_t *w, const dram_timings_t *d)
         if (d->ddr4_rfc_available) {
             set_label_fmt(w->lbl_rfc, "%u", d->rfc);
             set_label_fmt(w->lbl_rfc2, "%u", d->rfc2);
-            if (d->ddr4_ratio_available) {
+            if (d->data_rate_info.available) {
                 set_label_fmt(w->lbl_trfc_ns, "%.0f", d->trfc_ns);
                 set_label_fmt(w->lbl_rfc4, "%u (%.0f ns)", d->rfc4, d->trfc4_ns);
             } else {
@@ -434,11 +458,13 @@ static void refresh_rfc_ui(app_widgets_t *w, const dram_timings_t *d)
             snprintf(tooltip, sizeof(tooltip), "DDR4 refresh mode unavailable: read failed.");
         gtk_widget_set_tooltip_text(w->lbl_fgr, tooltip);
     } else {
-        set_label_fmt(w->lbl_trfc_ns, "%.0f", d->trfc_ns);
-        set_label_fmt(w->lbl_rfc, "%u", d->rfc);
-        set_label_fmt(w->lbl_rfc2, "%u", d->rfc2);
+        if (dram_has(d, DRAM_VALUE_RFC) && d->data_rate_info.available)
+            set_label_fmt(w->lbl_trfc_ns, "%.0f", d->trfc_ns);
+        else set_label_text(w->lbl_trfc_ns, "—");
+        set_timing(w->lbl_rfc, d, d->rfc, DRAM_VALUE_RFC);
+        set_timing(w->lbl_rfc2, d, d->rfc2, DRAM_VALUE_RFC);
     }
-    set_label_fmt(w->lbl_rfcsb, "%u", d->rfcsb);
+    set_timing(w->lbl_rfcsb, d, d->rfcsb, DRAM_VALUE_RFCSB);
 }
 
 /* Rendering selection never polls hardware or changes the UMC timing source. */
@@ -487,9 +513,12 @@ static void refresh_ui(app_widgets_t *w)
 
     /* Header */
     set_label_text(w->lbl_cpu_name, s->cpu.processor_name[0] ? s->cpu.processor_name : s->cpu.name);
+    gtk_widget_set_tooltip_text(w->lbl_cpu_name,
+        s->cpu.processor_name[0] ? s->cpu.processor_name : s->cpu.name);
     set_label_fmt(w->lbl_codename, "%s  ·  SMU %s  ·  %s",
                   s->cpu.codename, s->cpu.smu_version, s->cpu.pm_table_version);
     set_label_text(w->lbl_board_info, s->board.display_line);
+    gtk_widget_set_tooltip_text(w->lbl_board_info, s->board.display_line);
 
     /* Module dropdown — populate once */
     if (s->module_count > 0 && !w->modules_populated) {
@@ -506,16 +535,31 @@ static void refresh_ui(app_widgets_t *w)
     }
 
     /* DIMM speeds */
-    if (s->memory.frequency > 0.0f)
-        set_label_fmt(w->lbl_speed, "%.0f MT/s", s->memory.frequency);
+    if (s->memory.frequency_info.available)
+        set_label_fmt(w->lbl_speed, "%.0f MT/s%s", s->memory.frequency,
+                      s->memory.frequency_info.source == VALUE_SOURCE_SMBIOS ? " (configured)" :
+                      s->memory.frequency_info.source == VALUE_SOURCE_PM ? " (MCLK × 2)" : " (UMC0)");
     else
         set_label_text(w->lbl_speed, "—");
-    set_label_fmt(w->lbl_mclk, "%.0f MHz", m->mclk_mhz);
-    set_label_fmt(w->lbl_fclk, "%.0f MHz", m->fclk_mhz);
-    set_label_fmt(w->lbl_uclk, "%.0f MHz", m->uclk_mhz);
-    set_label_fmt(w->lbl_bclk, "%.1f MHz", m->bclk_mhz);
-    set_label_text(w->lbl_gdm, d->gdm_enabled ? "True" : "False");
-    set_label_text(w->lbl_powerdown, d->power_down_enabled ? "True" : "False");
+    gtk_widget_set_tooltip_text(w->lbl_speed, memory_frequency_source(s->memory.frequency_info.source));
+    set_clock(w->lbl_mclk, m->mclk_mhz, "%.0f MHz");
+    set_clock(w->lbl_fclk, m->fclk_mhz, "%.0f MHz");
+    set_clock(w->lbl_uclk, m->uclk_mhz, "%.0f MHz");
+    if (m->bclk_info.available)
+        set_clock(w->lbl_bclk, m->bclk_mhz,
+            m->bclk_info.source == VALUE_SOURCE_SMBIOS ? "%.1f MHz (configured)" : "%.1f MHz (estimate)");
+    else set_label_text(w->lbl_bclk, "—");
+    gtk_widget_set_tooltip_text(w->lbl_bclk, m->bclk_info.source == VALUE_SOURCE_SMBIOS ?
+        "SMBIOS external clock configuration; not a live measurement." :
+        "Estimate from cpufreq and the P0 MSR multiplier; not a measured base clock.");
+    set_label_text(w->lbl_gdm, !dram_has(d, DRAM_REG_RATIO) ? "—" : d->gdm_enabled ? "True" : "False");
+    set_label_text(w->lbl_powerdown, !dram_has(d, DRAM_REG_REFRESH) ? "—" : d->power_down_enabled ? "True" : "False");
+    set_label_text(w->lbl_timing_source, d->layout == DRAM_LAYOUT_NONE ?
+        "Timings unavailable: unknown decoder layout" :
+        d->layout == DRAM_LAYOUT_DDR4 ? "Timings: UMC0 · DDR4 decoder (independent of selected DIMM)" :
+        "Timings: UMC0 · DDR5 decoder (independent of selected DIMM)");
+    gtk_widget_set_tooltip_text(w->lbl_timing_source,
+        "SMN userspace I/O status only; hardware freshness and channel topology unverified.");
 
     /* SPD temp */
     if (m->spd_temps_count > 0) {
@@ -538,7 +582,7 @@ static void refresh_ui(app_widgets_t *w)
     }
 
     refresh_selected_module_ui(w);
-    set_label_text(w->lbl_cmd2t, d->cmd2t[0] ? d->cmd2t : "—");
+    set_label_text(w->lbl_cmd2t, dram_has(d, DRAM_REG_RATIO) && d->cmd2t[0] ? d->cmd2t : "—");
 
 /* Helper: show voltage or "—" if unavailable (0) */
 #define SET_VOLT(lbl, val) \
@@ -555,59 +599,65 @@ static void refresh_ui(app_widgets_t *w)
     SET_VOLT(w->lbl_cpu_vddio, m->cpu_vddio);
     SET_VOLT(w->lbl_mem_vpp,  m->mem_vpp);
     SET_VOLT(w->lbl_vcore,    m->vcore);
-    set_label_fmt(w->lbl_ppt, "%.1fW", m->ppt_w);
+    if (m->ppt_available) set_label_fmt(w->lbl_ppt, "%.1fW", m->ppt_w);
+    else set_label_text(w->lbl_ppt, "—");
 
     /* Primary timings */
-    set_label_fmt(w->lbl_tcl, "%u", d->tcl);
-    set_label_fmt(w->lbl_trcd_rd, "%u", d->trcd_rd);
-    set_label_fmt(w->lbl_trcd_wr, "%u", d->trcd_wr);
-    set_label_fmt(w->lbl_trp, "%u", d->trp);
-    set_label_fmt(w->lbl_tras, "%u", d->tras);
-    set_label_fmt(w->lbl_trc, "%u", d->trc);
-    set_label_fmt(w->lbl_trrds, "%u", d->trrds);
-    set_label_fmt(w->lbl_trrdl, "%u", d->trrdl);
-    set_label_fmt(w->lbl_tfaw, "%u", d->tfaw);
-    set_label_fmt(w->lbl_twr, "%u", d->twr);
-    set_label_fmt(w->lbl_tcwl, "%u", d->tcwl);
+    set_timing(w->lbl_tcl, d, d->tcl, DRAM_REG_50204);
+    set_timing(w->lbl_trcd_rd, d, d->trcd_rd, DRAM_REG_50204);
+    set_timing(w->lbl_trcd_wr, d, d->trcd_wr, DRAM_REG_50204);
+    set_timing(w->lbl_trp, d, d->trp, DRAM_REG_50208);
+    set_timing(w->lbl_tras, d, d->tras, DRAM_REG_50204);
+    set_timing(w->lbl_trc, d, d->trc, DRAM_REG_50208);
+    set_timing(w->lbl_trrds, d, d->trrds, DRAM_REG_5020C);
+    set_timing(w->lbl_trrdl, d, d->trrdl, DRAM_REG_5020C);
+    set_timing(w->lbl_tfaw, d, d->tfaw, DRAM_REG_50210);
+    set_timing(w->lbl_twr, d, d->twr, DRAM_REG_50218 | (d->twr_derived ? DRAM_REG_50214 : 0));
+    set_timing(w->lbl_tcwl, d, d->tcwl, DRAM_REG_50214);
     refresh_rfc_ui(w, d);
+    gtk_widget_set_tooltip_text(w->lbl_trcd_wr, d->trcd_wr_derived ?
+        "Derived: legacy zero RCDWR substitution from RCDRD; interpretation unverified." : "UMC0 RCDWR field");
+    gtk_widget_set_tooltip_text(w->lbl_twr, d->twr_derived ?
+        "Derived: legacy zero WR substitution from WTRS; interpretation unverified." : "UMC0 WR field");
 
     /* Secondary timings */
-    set_label_fmt(w->lbl_rtp, "%u", d->rtp);
-    set_label_fmt(w->lbl_wtrs, "%u", d->wtrs);
-    set_label_fmt(w->lbl_wtrl, "%u", d->wtrl);
-    set_label_fmt(w->lbl_rdwr, "%u", d->rdwr);
-    set_label_fmt(w->lbl_wrrd, "%u", d->wrrd);
-    set_label_fmt(w->lbl_rdrd_sc, "%u", d->rdrd_sc);
-    set_label_fmt(w->lbl_rdrd_sd, "%u", d->rdrd_sd);
-    set_label_fmt(w->lbl_rdrd_dd, "%u", d->rdrd_dd);
-    set_label_fmt(w->lbl_wrwr_sc, "%u", d->wrwr_sc);
-    set_label_fmt(w->lbl_wrwr_sd, "%u", d->wrwr_sd);
-    set_label_fmt(w->lbl_wrwr_dd, "%u", d->wrwr_dd);
-    set_label_fmt(w->lbl_refi, "%u", d->refi);
-    set_label_fmt(w->lbl_trefi_ns, "%.0f", d->trefi_ns);
-    set_label_fmt(w->lbl_wrpre, "%u", d->wrpre);
-    set_label_fmt(w->lbl_rdpre, "%u", d->rdpre);
+    set_timing(w->lbl_rtp, d, d->rtp, DRAM_REG_5020C);
+    set_timing(w->lbl_wtrs, d, d->wtrs, DRAM_REG_50214);
+    set_timing(w->lbl_wtrl, d, d->wtrl, DRAM_REG_50214);
+    set_timing(w->lbl_rdwr, d, d->rdwr, DRAM_REG_50228);
+    set_timing(w->lbl_wrrd, d, d->wrrd, DRAM_REG_50228);
+    set_timing(w->lbl_rdrd_sc, d, d->rdrd_sc, DRAM_REG_50220);
+    set_timing(w->lbl_rdrd_sd, d, d->rdrd_sd, DRAM_REG_50220);
+    set_timing(w->lbl_rdrd_dd, d, d->rdrd_dd, DRAM_REG_50220);
+    set_timing(w->lbl_wrwr_sc, d, d->wrwr_sc, DRAM_REG_50224);
+    set_timing(w->lbl_wrwr_sd, d, d->wrwr_sd, DRAM_REG_50224);
+    set_timing(w->lbl_wrwr_dd, d, d->wrwr_dd, DRAM_REG_50224);
+    set_timing(w->lbl_refi, d, d->refi, DRAM_REG_50230);
+    if (dram_has(d, DRAM_REG_50230) && d->data_rate_info.available)
+        set_label_fmt(w->lbl_trefi_ns, "%.0f", d->trefi_ns);
+    else set_label_text(w->lbl_trefi_ns, "—");
+    set_timing(w->lbl_wrpre, d, d->wrpre, DRAM_REG_502A4);
+    set_timing(w->lbl_rdpre, d, d->rdpre, DRAM_REG_502A4);
 
     /* Tertiary timings */
-    set_label_fmt(w->lbl_rdrd_scl, "%u", d->rdrd_scl);
-    set_label_fmt(w->lbl_wrwr_scl, "%u", d->wrwr_scl);
-    set_label_fmt(w->lbl_cke, "%u", d->cke);
-    set_label_fmt(w->lbl_xp, "%u", d->xp);
-    set_label_fmt(w->lbl_trc_page, "%u", d->trc_page);
-    set_label_fmt(w->lbl_mod, "%u", d->mod);
-    set_label_fmt(w->lbl_mod_pda, "%u", d->mod_pda);
-    set_label_fmt(w->lbl_mrd, "%u", d->mrd);
-    set_label_fmt(w->lbl_mrd_pda, "%u", d->mrd_pda);
-    set_label_fmt(w->lbl_stag, "%u", d->stag);
-    set_label_fmt(w->lbl_stag_sb, "%u", d->stag_sb);
-    set_label_fmt(w->lbl_phy_wrl, "%u", d->phy_wrl);
-    set_label_fmt(w->lbl_phy_rdl, "%u", d->phy_rdl);
-    set_label_fmt(w->lbl_phy_wrd, "%u", d->phy_wrd);
+    set_timing(w->lbl_rdrd_scl, d, d->rdrd_scl, DRAM_REG_50220);
+    set_timing(w->lbl_wrwr_scl, d, d->wrwr_scl, DRAM_REG_50224);
+    set_timing(w->lbl_cke, d, d->cke, DRAM_REG_50254);
+    set_timing(w->lbl_xp, d, d->xp, DRAM_REG_50254);
+    set_timing(w->lbl_trc_page, d, d->trc_page, DRAM_REG_5021C);
+    set_timing(w->lbl_mod, d, d->mod, DRAM_REG_50234);
+    set_timing(w->lbl_mod_pda, d, d->mod_pda, DRAM_REG_50234);
+    set_timing(w->lbl_mrd, d, d->mrd, DRAM_REG_50234);
+    set_timing(w->lbl_mrd_pda, d, d->mrd_pda, DRAM_REG_50234);
+    set_timing(w->lbl_stag, d, d->stag, DRAM_REG_50250);
+    set_timing(w->lbl_stag_sb, d, d->stag_sb, DRAM_REG_50250);
+    set_timing(w->lbl_phy_wrl, d, d->phy_wrl, DRAM_REG_50258);
+    set_timing(w->lbl_phy_rdl, d, d->phy_rdl, DRAM_REG_50258);
+    set_timing(w->lbl_phy_wrd, d, d->phy_wrd, DRAM_REG_50258);
 
     /* Footer mem type */
-    const char *mem_str = s->memory.type == MEM_DDR5 ? "DDR5" :
-                          s->memory.type == MEM_DDR4 ? "DDR4" : "—";
-    set_label_text(w->lbl_footer_type, mem_str);
+    set_label_text(w->lbl_footer_type, memory_type_label(s->memory.type));
+    gtk_widget_set_tooltip_text(w->lbl_footer_type, memory_type_reason(s->memory.type_state));
 
     /* CPU tab — VID & per-core voltages */
     SET_VOLT(w->lbl_vid, m->vid);
@@ -950,7 +1000,7 @@ static void on_activate(GtkApplication *app, gpointer user_data)
     /* Window */
     w->window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(w->window), "TuxTimings");
-    gtk_window_set_default_size(GTK_WINDOW(w->window), 420, 820);
+    gtk_window_set_default_size(GTK_WINDOW(w->window), 820, 900);
     gtk_window_set_resizable(GTK_WINDOW(w->window), TRUE);
     gtk_widget_set_size_request(GTK_WIDGET(w->window), 380, 720);
 
@@ -969,6 +1019,8 @@ static void on_activate(GtkApplication *app, gpointer user_data)
     GtkWidget *header = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     GtkWidget *header_top = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     w->lbl_cpu_name = make_label("TuxTimings", "header-title");
+    gtk_label_set_wrap(GTK_LABEL(w->lbl_cpu_name), FALSE);
+    gtk_label_set_ellipsize(GTK_LABEL(w->lbl_cpu_name), PANGO_ELLIPSIZE_END);
     gtk_widget_set_hexpand(w->lbl_cpu_name, TRUE);
     gtk_box_append(GTK_BOX(header_top), w->lbl_cpu_name);
 
@@ -992,8 +1044,12 @@ static void on_activate(GtkApplication *app, gpointer user_data)
     /* Board info row: board string left, version right */
     GtkWidget *board_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     w->lbl_board_info = make_label("", "footer-muted");
+    gtk_label_set_wrap(GTK_LABEL(w->lbl_board_info), FALSE);
+    gtk_label_set_ellipsize(GTK_LABEL(w->lbl_board_info), PANGO_ELLIPSIZE_END);
     gtk_widget_set_hexpand(w->lbl_board_info, TRUE);
-    GtkWidget *lbl_version = make_label(APP_VERSION, "footer-muted");
+    GtkWidget *lbl_version = make_label(TUXTIMINGS_BUILD_VERSION, "footer-muted");
+    gtk_widget_set_tooltip_text(lbl_version, TUXTIMINGS_BUILD_ID);
+    gtk_label_set_max_width_chars(GTK_LABEL(lbl_version), 24);
     gtk_label_set_xalign(GTK_LABEL(lbl_version), 1.0f);
     gtk_box_append(GTK_BOX(board_row), w->lbl_board_info);
     gtk_box_append(GTK_BOX(board_row), lbl_version);
@@ -1005,7 +1061,10 @@ static void on_activate(GtkApplication *app, gpointer user_data)
     gtk_widget_set_vexpand(notebook, TRUE);
 
     GtkWidget *ram_tab = build_ram_tab(w);
-    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), ram_tab, gtk_label_new("RAM"));
+    GtkWidget *ram_scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ram_scroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(ram_scroll), ram_tab);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), ram_scroll, gtk_label_new("RAM"));
 
     GtkWidget *cpu_tab = build_cpu_tab(w);
     gtk_notebook_append_page(GTK_NOTEBOOK(notebook), cpu_tab, gtk_label_new("CPU"));

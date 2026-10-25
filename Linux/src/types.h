@@ -12,6 +12,14 @@
 
 typedef enum { MEM_UNKNOWN, MEM_DDR4, MEM_DDR5, MEM_LPDDR4, MEM_LPDDR5 } mem_type_t;
 typedef enum { RANK_SR, RANK_DR, RANK_QR } mem_rank_t;
+/* Decoder path, not certification of the physical memory type (e.g. LPDDR). */
+typedef enum { DRAM_LAYOUT_NONE, DRAM_LAYOUT_DDR4, DRAM_LAYOUT_DDR5 } dram_layout_t;
+
+typedef enum {
+    DIMM_TEMP_UNASSOCIATED, DIMM_TEMP_IDENTITY_MISSING, DIMM_TEMP_AMBIGUOUS,
+    DIMM_TEMP_SPD_UNAVAILABLE, DIMM_TEMP_INCOMPATIBLE, DIMM_TEMP_INVENTORY_INCOMPLETE,
+    DIMM_TEMP_ASSOCIATED, DIMM_TEMP_SENSOR_MISSING
+} dimm_temp_state_t;
 
 typedef struct {
     char bank_label[STR_LEN];
@@ -22,6 +30,11 @@ typedef struct {
     uint64_t capacity_bytes;
     uint32_t clock_speed_mhz;
     mem_rank_t rank;
+    mem_type_t type; /* SMBIOS Type, independent of CPU codename */
+    dimm_temp_state_t temp_state;
+    bool temperature_available;
+    float temperature_c;
+    char temperature_sensor[STR_SHORT];
     /* Derived */
     char slot_label[24];   /* e.g. "A1", "Slot 0" */
     char slot_display[64]; /* e.g. "A1 - 16.0 GiB" */
@@ -84,7 +97,10 @@ typedef struct {
     int   core_freq_count;
     /* SPD temps */
     float spd_temps_c[MAX_MODULES];
+    bool  spd_temps_available[MAX_MODULES];
     int   spd_temps_count;
+    /* Sensor identity, independent of unverified SMBIOS slot ordering. */
+    char spd_temp_labels[MAX_MODULES][STR_SHORT];
 } smu_metrics_t;
 
 typedef struct {
@@ -110,6 +126,17 @@ typedef struct {
     bool gdm_enabled, power_down_enabled;
     char cmd2t[4];
     float frequency_hint_mhz;
+    /* DDR4 refresh fields; zero for other memory types. FGR is the raw
+     * 0x5012C[18:16] code, not a refresh multiplier or an I/O validity flag.
+     * 0: normal; 1/2: fixed 2x/4x; 5/6: on-the-fly 1x/2x or 1x/4x.
+     * 3/4/7 are reserved. Keep rfc/trfc_ns as the base tRFC value. */
+    uint32_t rfc4, fgr;
+    float trfc4_ns;
+    dram_layout_t layout;
+    /* Userspace I/O availability, not proof of hardware validity or freshness.
+     * RFC requires both reads and a nonzero selected register; ratio requires
+     * a nonzero decoded ratio. Zero FGR is valid only with fgr_io_ok. */
+    bool ddr4_fgr_io_ok, ddr4_rfc_available, ddr4_ratio_available;
 } dram_timings_t;
 
 typedef struct {

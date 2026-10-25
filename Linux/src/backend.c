@@ -1,6 +1,7 @@
 #include "backend.h"
 #include "pm_table.h"
 #include "dram.h"
+#include "dimm_sensors.h"
 #include "util.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +38,9 @@ static char s_bios_date[STR_SHORT];
 static char s_agesa_version[STR_LEN];
 static memory_module_t s_modules[MAX_MODULES];
 static int  s_module_count;
+static bool s_module_inventory_complete = true;
+/* Process-lifetime cache; backend_cleanup is also called from signal handlers. */
+static dimm_sensors_cache_t *s_dimm_sensors;
 
 /* Previous /proc/stat per-logical-cpu times for usage delta */
 #define MAX_LOGICAL_CPUS 256
@@ -207,15 +211,17 @@ static void parse_dmidecode_memory(void)
     };
     char *out = NULL;
     for (int ci = 0; cmds[ci]; ci++) {
-        out = run_command(cmds[ci]);
+        out = run_command_checked(cmds[ci]);
         if (out && out[0]) break;
         if (out) { free(out); out = NULL; }
     }
-    if (!out) return;
+    if (!out) { s_module_inventory_complete = false; return; }
 
     /* Parse into a temporary list; only overwrite globals on success. */
     memory_module_t tmp_modules[MAX_MODULES];
     int tmp_count = 0;
+    bool tmp_complete = true;
+    bool known_empty = false;
 
     memory_module_t cur;
     memset(&cur, 0, sizeof(cur));
@@ -226,13 +232,16 @@ static void parse_dmidecode_memory(void)
     while (line) {
         if (strstr(line, "Memory Device") && !strstr(line, "Mapped")) {
             /* save previous */
-            if (in_device && cap > 0 && tmp_count < MAX_MODULES) {
-                cur.capacity_bytes = cap;
-                build_module_display(&cur, tmp_count);
-                tmp_modules[tmp_count++] = cur;
-            }
+            if (in_device && cap > 0) {
+                if (tmp_count < MAX_MODULES) {
+                    cur.capacity_bytes = cap;
+                    build_module_display(&cur, tmp_count);
+                    tmp_modules[tmp_count++] = cur;
+                } else tmp_complete = false;
+            } else if (in_device && !known_empty) tmp_complete = false;
             memset(&cur, 0, sizeof(cur));
             cap = 0;
+            known_empty = false;
             in_device = 1;
             line = strtok(NULL, "\n");
             continue;
@@ -250,8 +259,23 @@ static void parse_dmidecode_memory(void)
         const char *val = colon + 1;
         while (*val == ' ') val++;
 
-        if (klen == 4 && strncmp(trimmed, "Size", 4) == 0)
+        if (klen == 4 && strncmp(trimmed, "Size", 4) == 0) {
             cap = parse_capacity(val);
+            const char *size_value = val;
+            while (isspace((unsigned char)*size_value)) size_value++;
+            size_t size_len = strlen(size_value);
+            while (size_len > 0 && isspace((unsigned char)size_value[size_len - 1])) size_len--;
+            known_empty = (size_len == sizeof("No Module Installed") - 1 &&
+                           strncmp(size_value, "No Module Installed", size_len) == 0) ||
+                          (size_len == sizeof("Not Installed") - 1 &&
+                           strncmp(size_value, "Not Installed", size_len) == 0);
+        }
+        else if (klen == 4 && strncmp(trimmed, "Type", 4) == 0) {
+            if (!strcmp(val, "DDR4")) cur.type = MEM_DDR4;
+            else if (!strcmp(val, "DDR5")) cur.type = MEM_DDR5;
+            else if (!strcmp(val, "LPDDR4")) cur.type = MEM_LPDDR4;
+            else if (!strcmp(val, "LPDDR5")) cur.type = MEM_LPDDR5;
+        }
         else if (klen == 7 && strncmp(trimmed, "Locator", 7) == 0)
             snprintf(cur.device_locator, STR_LEN, "%s", val);
         else if (klen == 12 && strncmp(trimmed, "Bank Locator", 12) == 0)
@@ -281,13 +305,16 @@ static void parse_dmidecode_memory(void)
         line = strtok(NULL, "\n");
     }
     /* last device */
-    if (in_device && cap > 0 && tmp_count < MAX_MODULES) {
-        cur.capacity_bytes = cap;
-        build_module_display(&cur, tmp_count);
-        tmp_modules[tmp_count++] = cur;
-    }
+    if (in_device && cap > 0) {
+        if (tmp_count < MAX_MODULES) {
+            cur.capacity_bytes = cap;
+            build_module_display(&cur, tmp_count);
+            tmp_modules[tmp_count++] = cur;
+        } else tmp_complete = false;
+    } else if (in_device && !known_empty) tmp_complete = false;
     free(out);
 
+    s_module_inventory_complete = tmp_complete;
     if (tmp_count > 0) {
         s_module_count = tmp_count;
         memcpy(s_modules, tmp_modules, tmp_count * sizeof(memory_module_t));
@@ -576,38 +603,6 @@ static void apply_per_core_temps_hwmon(smu_metrics_t *m)
             }
         }
         closedir(d2);
-    }
-    closedir(hwmon);
-}
-
-/* ── SPD5118 DIMM temps ─────────────────────────────────────────────── */
-
-static void read_spd_temps(smu_metrics_t *m)
-{
-    /* Try hwmon entries named spd5118 */
-    DIR *hwmon = opendir("/sys/class/hwmon");
-    if (!hwmon) return;
-    struct dirent *ent;
-    m->spd_temps_count = 0;
-    while ((ent = readdir(hwmon)) && m->spd_temps_count < MAX_MODULES) {
-        if (ent->d_name[0] == '.') continue;
-        char namepath[640], name[64];
-        snprintf(namepath, sizeof(namepath), "/sys/class/hwmon/%s/name", ent->d_name);
-        if (!read_file_string(namepath, name, sizeof(name))) continue;
-        char lower[64];
-        int li = 0;
-        for (; name[li] && li < 63; li++)
-            lower[li] = (char)tolower((unsigned char)name[li]);
-        lower[li] = '\0';
-        if (!strstr(lower, "spd5118") && !strstr(lower, "jc42")) continue;
-
-        char tpath[640];
-        snprintf(tpath, sizeof(tpath), "/sys/class/hwmon/%s/temp1_input", ent->d_name);
-        int raw = read_int_file(tpath);
-        if (raw == 0) continue;
-        float c = raw / 1000.0f;
-        if (c >= 0.0f && c <= 150.0f)
-            m->spd_temps_c[m->spd_temps_count++] = c;
     }
     closedir(hwmon);
 }
@@ -1064,7 +1059,9 @@ void backend_read_summary(system_summary_t *out)
     /* hwmon overlays */
     apply_per_core_temps_hwmon(&out->metrics);
     apply_k10temp_tctl_tccd(&out->metrics);
-    read_spd_temps(&out->metrics);
+    if (!s_dimm_sensors) s_dimm_sensors = dimm_sensors_create();
+    dimm_sensors_update(s_dimm_sensors, "/sys", out->modules, out->module_count,
+                        s_module_inventory_complete, &out->metrics);
 
     /* Per-core usage and frequency */
     read_core_usage(&out->metrics);

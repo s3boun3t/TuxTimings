@@ -20,7 +20,7 @@ typedef struct {
 
     /* RAM tab — DIMM info */
     GtkWidget *lbl_capacity, *lbl_manufacturer, *lbl_part_number;
-    GtkWidget *lbl_serial_number, *lbl_rank, *lbl_cmd2t;
+    GtkWidget *lbl_serial_number, *lbl_rank, *lbl_cmd2t, *lbl_module_temp;
 
     /* RAM tab — Voltages */
     GtkWidget *lbl_vsoc, *lbl_vddp, *lbl_vddg_ccd, *lbl_vddg_iod;
@@ -31,6 +31,8 @@ typedef struct {
     GtkWidget *lbl_tcl, *lbl_trcd_rd, *lbl_trcd_wr, *lbl_trp, *lbl_tras, *lbl_trc;
     GtkWidget *lbl_trrds, *lbl_trrdl, *lbl_tfaw, *lbl_twr, *lbl_tcwl;
     GtkWidget *lbl_trfc_ns, *lbl_rfc, *lbl_rfc2, *lbl_rfcsb;
+    GtkWidget *lbl_rfc4, *lbl_fgr;
+    GtkWidget *lbl_rfc4_title, *lbl_fgr_title, *lbl_rfcsb_title;
 
     /* RAM tab — Secondary timings */
     GtkWidget *lbl_rtp, *lbl_wtrs, *lbl_wtrl, *lbl_rdwr, *lbl_wrrd;

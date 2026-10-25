@@ -21,6 +21,8 @@
  * (defaults: 500–3000; widen max for boards with high DRAM voltage mode.)
  */
 
+#include "aod_aml.h"
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -66,12 +68,11 @@ MODULE_VERSION("0.5");
  *   MemVddq  = 9088  (WCNS + 212)
  *   MemVpp   = 9092  (WCNS + 216)
  */
-#define AOD_REGION_SIZE  0x24BB
+static size_t aod_region_size;
 #define WCNS_OFFSET      8876
 #define WCNS_SIZE        512
 /* Scan the full region to catch data in any field */
 #define SCAN_START       4      /* skip first 4 bytes (status/version) */
-#define SCAN_END         AOD_REGION_SIZE
 
 /*
  * Voltages are stored as unsigned 32-bit integers in millivolts.
@@ -129,7 +130,7 @@ static u32 read_mv(int offset)
 {
     u32 v;
 
-    if (!aod_base || offset <= 0 || offset + 4 > AOD_REGION_SIZE)
+    if (!aod_base || !aod_u32_fits(offset, aod_region_size))
         return 0;
     memcpy(&v, (u8 *)aod_base + offset, 4);
     return v;
@@ -149,7 +150,7 @@ static ssize_t scan_show(struct kobject *kobj,
                      "offset  hex     field  value\n"
                      "------  ------  -----  -------\n");
 
-    for (i = SCAN_START; i < SCAN_END - 4; i += 4) {
+    for (i = SCAN_START; aod_u32_fits(i, aod_region_size); i += 4) {
         u32 mv = read_mv(i);
 
         if (mv < scan_mv_min || mv > scan_mv_max)
@@ -184,7 +185,7 @@ static ssize_t show_named(struct kobject *kobj,
 
     if (!aod_base)
         return scnprintf(buf, PAGE_SIZE, "error: not mapped\n");
-    if (offset <= 0 || offset + 4 > AOD_REGION_SIZE)
+    if (!aod_u32_fits(offset, aod_region_size))
         return scnprintf(buf, PAGE_SIZE,
                          "unset — reload with: modprobe aod_voltages off_vddio=N ...\n");
 
@@ -215,17 +216,19 @@ static ssize_t full_raw_read(struct file *filp, struct kobject *kobj,
 {
     if (!aod_base)
         return -ENODEV;
-    if (off >= AOD_REGION_SIZE)
+    if (off < 0)
+        return -EINVAL;
+    if (off >= aod_region_size)
         return 0;
-    if (count > AOD_REGION_SIZE - off)
-        count = AOD_REGION_SIZE - off;
+    if (count > aod_region_size - off)
+        count = aod_region_size - off;
     memcpy(buf, (u8 *)aod_base + off, count);
     return count;
 }
 
 static struct bin_attribute bin_attr_full_raw = {
     .attr = { .name = "full_raw", .mode = 0444 },
-    .size = AOD_REGION_SIZE,
+    /* Set to the firmware-declared length before publishing. */
     .read = full_raw_read,
 };
 
@@ -267,35 +270,31 @@ static phys_addr_t find_aod_phys(void)
         if (ACPI_FAILURE(status))
             break;
 
+        if (hdr->length < sizeof(*hdr)) {
+            acpi_put_table(hdr);
+            continue;
+        }
         aml     = (u8 *)hdr + sizeof(*hdr);
         aml_len = hdr->length - (u32)sizeof(*hdr);
 
-        for (i = 0; i + sizeof(aode_pattern) + 10 < aml_len; i++) {
-            phys_addr_t addr = 0;
-            u8 enc;
+        for (i = 0; aml_len >= sizeof(aode_pattern) &&
+                    i <= aml_len - sizeof(aode_pattern); i++) {
+            unsigned long long addr, size;
+            u32 start = i + sizeof(aode_pattern);
 
             if (memcmp(aml + i, aode_pattern, sizeof(aode_pattern)) != 0 &&
                 memcmp(aml + i, aodt_pattern, sizeof(aodt_pattern)) != 0)
                 continue;
-
-            enc = aml[i + sizeof(aode_pattern)];
-
-            if (enc == 0x0C) {
-                /* DWordConst: 4-byte LE address */
-                u32 tmp32;
-                memcpy(&tmp32, aml + i + sizeof(aode_pattern) + 1, 4);
-                addr = tmp32;
-            } else if (enc == 0x0E) {
-                /* QWordConst: 8-byte LE address */
-                memcpy(&addr, aml + i + sizeof(aode_pattern) + 1, 8);
-            } else {
+            if (!aod_aml_region(aml + start, aml_len - start, &addr, &size) ||
+                (phys_addr_t)addr != addr ||
+                (phys_addr_t)(addr + size - 1) != addr + size - 1)
                 continue;
-            }
 
-            pr_info("aod_voltages: AOD region phys=0x%llx size=0x%x\n",
-                    (unsigned long long)addr, AOD_REGION_SIZE);
+            aod_region_size = size;
+            pr_info("aod_voltages: AOD region phys=0x%llx size=0x%zx\n",
+                    addr, aod_region_size);
             acpi_put_table(hdr);
-            return addr;
+            return (phys_addr_t)addr;
         }
 
         acpi_put_table(hdr);
@@ -415,7 +414,7 @@ static int __init aod_voltages_init(void)
         return -ENODEV;
     }
 
-    aod_base = memremap(phys, AOD_REGION_SIZE, MEMREMAP_WB);
+    aod_base = memremap(phys, aod_region_size, MEMREMAP_WB);
     if (!aod_base) {
         pr_err("aod_voltages: memremap(0x%llx) failed\n",
                (unsigned long long)phys);
@@ -434,6 +433,7 @@ static int __init aod_voltages_init(void)
         return -ENOMEM;
     }
 
+    bin_attr_full_raw.size = aod_region_size;
     if (sysfs_create_bin_file(aod_kobj, &bin_attr_full_raw) != 0) {
         sysfs_remove_group(aod_kobj, &aod_attr_group);
         kobject_put(aod_kobj);

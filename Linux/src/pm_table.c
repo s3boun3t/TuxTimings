@@ -73,12 +73,13 @@ static const pm_family_map_t VERMEER_380904 = {
 
 /* Vermeer 0x380905 (5600X 6-core, newer BIOS) */
 static const pm_family_map_t VERMEER_380905 = {
+    /* Index 11 is not a validated IOD temperature in this table. */
     .named = {
-        {11, F_IOD_HOTSPOT}, {48, F_FCLK}, {50, F_UCLK}, {51, F_MCLK},
+        {48, F_FCLK}, {50, F_UCLK}, {51, F_MCLK},
         {44, F_VSOC}, {137, F_VDDP}, {138, F_VDDG_IOD}, {139, F_VDDG_CCD},
         {39, F_VCORE}
     },
-    .named_count = 9,
+    .named_count = 8,
     .vid_idx = 10, .ppt_idx = 1, .socket_power_idx = 29,
     .core_voltage_start = 180, .core_temp_start = 186, .core_clock_start = -1,
     .max_cores = 6
@@ -305,7 +306,34 @@ void pm_table_read(uint32_t version, const float *table, int count,
 
     /* All families use the version-based map for named entries */
     const pm_family_map_t *map = get_family_map(version);
+    /* 0x380905 stores eight hardware slots even on six-core Vermeer.
+     * Eight-core layout corroborated on 5700X3D (372 float entries).
+     * Do not infer fused-slot topology for six-core parts here.
+     */
+    const int vermeer_8 = version == 0x380905 && physical_cores == 8
+                          && count == 372;
+    pm_family_map_t eight_core_map;
+    if (vermeer_8) {
+        eight_core_map = *map;
+        eight_core_map.max_cores = 8;
+        eight_core_map.core_temp_start = 188;
+        eight_core_map.core_clock_start = 212;
+        map = &eight_core_map;
+    }
     apply_named(map, table, count, out);
+
+    /* 0x380905 / 0x5d0 bytes: 39 and 44 are setpoints; telemetry is
+     * 40 (CPU) and 45 (SoC). See Linux/docs/PM_TABLE_INDICES.md.
+     * Match the table layout, independently of CPU SKU or motherboard.
+     */
+    if (version == 0x380905 && count == 372) {
+        const float cpu_v = table[40];
+        const float soc_v = table[45];
+        out->vcore = isfinite(cpu_v) && cpu_v > 0.0f && cpu_v < 3.0f
+                     ? cpu_v : 0.0f;
+        out->vsoc = isfinite(soc_v) && soc_v > 0.0f && soc_v < 3.0f
+                    ? soc_v : 0.0f;
+    }
 
     /* Per-core temps and voltages — clamp to physical core count. */
     int nc = map->max_cores;
@@ -318,7 +346,12 @@ void pm_table_read(uint32_t version, const float *table, int count,
         for (int i = 0; i < nc; i++)
             out->core_temps_c[i] = table[map->core_temp_start + i];
     }
-    if (map->core_voltage_start + nc <= count) {
+    if (vermeer_8) {
+        /* Preserve hardware slot identity, including a zero reading. */
+        out->core_voltages_count = nc;
+        for (int i = 0; i < nc; i++)
+            out->core_voltages[i] = table[180 + i];
+    } else if (map->core_voltage_start + nc <= count) {
         int out_idx = 0;
         // Scan all possible slots, collect up to 'nc' non-zero voltages
         for (int i = 0; i < map->max_cores; i++) {

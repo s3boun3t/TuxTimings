@@ -12,7 +12,7 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
-src/%.o: src/%.c
+src/%.o: src/%.c $(wildcard src/*.h)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Build the tuxbench kernel module (optional — app works without it)

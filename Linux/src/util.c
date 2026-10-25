@@ -48,7 +48,7 @@ int read_int_file(const char *path)
     return (int)strtol(buf, NULL, 10);
 }
 
-char *run_command(const char *cmd)
+static char *run_command_output(const char *cmd, int checked)
 {
     FILE *fp = popen(cmd, "r");
     if (!fp) return NULL;
@@ -67,8 +67,20 @@ char *run_command(const char *cmd)
         }
     }
     buf[len] = '\0';
-    pclose(fp);
+    int read_failed = checked && ferror(fp);
+    int status = pclose(fp);
+    if (checked && (read_failed || status != 0)) { free(buf); return NULL; }
     return buf;
+}
+
+char *run_command(const char *cmd)
+{
+    return run_command_output(cmd, 0);
+}
+
+char *run_command_checked(const char *cmd)
+{
+    return run_command_output(cmd, 1);
 }
 
 int file_exists(const char *path)

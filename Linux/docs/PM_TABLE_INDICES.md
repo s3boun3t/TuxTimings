@@ -124,7 +124,30 @@ Same named fields as 0x380804 except `vcore` = 40.
 
 ### Vermeer — PM table `0x00380905` (5600X 6-core, newer BIOS)
 
-Same named fields as 0x380904 except `vcore` = 39.
+For the known 1488-byte layout (372 floats), `vcore` uses CPU telemetry
+at index 40 and `vsoc` uses SoC telemetry at index 45. Indices 39 and 44
+are setpoints and must not be presented as live voltage telemetry. This
+selection depends on table version and length, not a motherboard or CPU SKU.
+Other lengths retain the existing mappings (`vcore` = 39, `vsoc` = 44).
+Invalid telemetry samples (non-finite, non-positive, or >= 3 V) are exposed
+as unavailable, without falling back to a setpoint.
+
+References:
+
+- [ryzen_monitor, pm_table_0x380905](https://github.com/hattedsquirrel/ryzen_monitor/blob/7529c7cfc2688d9781912c84adfc0343d83dc78c/src/pm_tables.c):
+  `CPU_SET_VOLTAGE` 39, `CPU_TELEMETRY_VOLTAGE` 40,
+  `CPU_TELEMETRY_VOLTAGE2` 41, `SOC_SET_VOLTAGE` 44,
+  `SOC_TELEMETRY_VOLTAGE` 45. This is a community decoded map, not an AMD
+  specification; index 41's precise distinction remains unverified.
+- [ZenStates-Core v1.93](https://github.com/irusanov/ZenStates-Core/blob/869b7e8/Hardware/PowerTable.cs):
+  table 0x380905, size 0x5D0, VddcrSoc offset 0xB4 (float index 45).
+- Repeated 5700X3D samples: index 39 stayed near 1.30 V and 44 near 1.10 V;
+  index 40 varied roughly 1.01-1.18 V and 45 roughly 1.087-1.089 V.
+  These observations support the mapping but are not electrical calibration.
+
+These CPU/SoC readings do not provide DDR4 VDIMM. MEM VDD remains sourced
+from the AOD sysfs attribute when available. No hardware writes are added.
+Index 11 is not mapped as IOD temperature in this version (see patch 0005).
 
 | Index / Range | Field |
 | ------------- | ----- |

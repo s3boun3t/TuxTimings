@@ -1,5 +1,7 @@
 #include "ui.h"
 #include "backend.h"
+#include "dram.h"
+#include "dimm_sensors.h"
 #include "bench.h"
 #include "pi_bench.h"
 #include <stdio.h>
@@ -29,9 +31,10 @@ static const char *css_data =
     "notebook > header > tabs > tab:checked { color: #E6EDF3; border-bottom: 2px solid #3FB950; }\n"
     "notebook > stack { background: transparent; }\n"
     "dropdown { background-color: #161B22; color: #E6EDF3; font-size: 0.9em; }\n"
-    "dropdown > button { background-color: #161B22; color: #E6EDF3; border: 1px solid #30363D; }\n"
+    "dropdown > button { background-image: none; background-color: #161B22; color: #E6EDF3; border: 1px solid #30363D; }\n"
     "scrolledwindow { background: transparent; }\n"
-    "button { background-color: #21262D; color: #E6EDF3; border: 1px solid #30363D; border-radius: 6px; padding: 4px 12px; font-size: 0.85em; }\n"
+    "button { background-image: none; background-color: #21262D; color: #E6EDF3; border: 1px solid #30363D; border-radius: 6px; padding: 4px 12px; font-size: 0.85em; }\n"
+    "button label { color: inherit; text-shadow: none; }\n"
     "button:hover { background-color: #30363D; }\n"
     "button:disabled { opacity: 0.4; }\n";
 
@@ -85,13 +88,14 @@ static GtkWidget *make_value(const char *text)
     return l;
 }
 
-static void grid_row(GtkWidget *grid, int row, const char *label_text, GtkWidget **out_val)
+static GtkWidget *grid_row(GtkWidget *grid, int row, const char *label_text, GtkWidget **out_val)
 {
     GtkWidget *lbl = make_label(label_text, "label");
     *out_val = make_value("—");
     gtk_widget_set_hexpand(grid, TRUE);
     gtk_grid_attach(GTK_GRID(grid), lbl, 0, row, 1, 1);
     gtk_grid_attach(GTK_GRID(grid), *out_val, 1, row, 1, 1);
+    return lbl;
 }
 
 static void set_label_text(GtkWidget *label, const char *text)
@@ -159,7 +163,7 @@ static GtkWidget *build_ram_tab(app_widgets_t *w)
 
         GtkWidget *lbl_gdm_h   = make_label("GDM",       "label");
         GtkWidget *lbl_pd_h    = make_label("PowerDown", "label");
-        GtkWidget *lbl_temp_h  = make_label("Temp",      "label");
+        GtkWidget *lbl_temp_h  = make_label("RAM sensors", "label");
         w->lbl_gdm       = make_value("—");
         w->lbl_powerdown = make_value("—");
         w->lbl_spd_temp  = make_value("—");
@@ -189,6 +193,7 @@ static GtkWidget *build_ram_tab(app_widgets_t *w)
         grid_row(g, r++, "Part Number:", &w->lbl_part_number);
         grid_row(g, r++, "Serial:", &w->lbl_serial_number);
         grid_row(g, r++, "Rank:", &w->lbl_rank);
+        grid_row(g, r++, "Temperature:", &w->lbl_module_temp);
         grid_row(g, r++, "Cmd2T:", &w->lbl_cmd2t);
         gtk_box_append(GTK_BOX(info_box), g);
     }
@@ -248,7 +253,11 @@ static GtkWidget *build_ram_tab(app_widgets_t *w)
         grid_row(g, r++, "tRFC (ns)", &w->lbl_trfc_ns);
         grid_row(g, r++, "tRFC", &w->lbl_rfc);
         grid_row(g, r++, "tRFC2", &w->lbl_rfc2);
-        grid_row(g, r++, "tRFCsb", &w->lbl_rfcsb);
+        w->lbl_rfc4_title = grid_row(g, r++, "tRFC4", &w->lbl_rfc4);
+        w->lbl_fgr_title = grid_row(g, r++, "FGR", &w->lbl_fgr);
+        w->lbl_rfcsb_title = grid_row(g, r++, "tRFCsb", &w->lbl_rfcsb);
+        gtk_widget_set_tooltip_text(w->lbl_fgr_title,
+            "Configured DDR4 Fine Granularity Refresh mode; not the instantaneous mode.");
         gtk_box_append(GTK_BOX(prim_box), g);
     }
     gtk_box_append(GTK_BOX(mid), prim_box);
@@ -387,6 +396,88 @@ static GtkWidget *build_cpu_tab(app_widgets_t *w)
 
 /* ── Refresh data → UI ──────────────────────────────────────────────── */
 
+/* Keep memory-specific row visibility tied to the actual decoder route. */
+static void refresh_rfc_ui(app_widgets_t *w, const dram_timings_t *d)
+{
+    bool ddr4 = d->layout == DRAM_LAYOUT_DDR4;
+    bool ddr5 = d->layout == DRAM_LAYOUT_DDR5;
+    gtk_widget_set_visible(w->lbl_rfc4_title, ddr4);
+    gtk_widget_set_visible(w->lbl_rfc4, ddr4);
+    gtk_widget_set_visible(w->lbl_fgr_title, ddr4);
+    gtk_widget_set_visible(w->lbl_fgr, ddr4);
+    gtk_widget_set_visible(w->lbl_rfcsb_title, ddr5);
+    gtk_widget_set_visible(w->lbl_rfcsb, ddr5);
+
+    if (ddr4) {
+        if (d->ddr4_rfc_available) {
+            set_label_fmt(w->lbl_rfc, "%u", d->rfc);
+            set_label_fmt(w->lbl_rfc2, "%u", d->rfc2);
+            if (d->ddr4_ratio_available) {
+                set_label_fmt(w->lbl_trfc_ns, "%.0f", d->trfc_ns);
+                set_label_fmt(w->lbl_rfc4, "%u (%.0f ns)", d->rfc4, d->trfc4_ns);
+            } else {
+                set_label_text(w->lbl_trfc_ns, "—");
+                set_label_fmt(w->lbl_rfc4, "%u (— ns)", d->rfc4);
+            }
+        } else {
+            set_label_text(w->lbl_trfc_ns, "—");
+            set_label_text(w->lbl_rfc, "—");
+            set_label_text(w->lbl_rfc2, "—");
+            set_label_text(w->lbl_rfc4, "—");
+        }
+        set_label_text(w->lbl_fgr, d->ddr4_fgr_io_ok ? dram_fgr_label(d->fgr) : "—");
+        char tooltip[160];
+        if (d->ddr4_fgr_io_ok)
+            snprintf(tooltip, sizeof(tooltip),
+                     "Configured DDR4 FGR code %u; not the instantaneous mode.", d->fgr);
+        else
+            snprintf(tooltip, sizeof(tooltip), "DDR4 refresh mode unavailable: read failed.");
+        gtk_widget_set_tooltip_text(w->lbl_fgr, tooltip);
+    } else {
+        set_label_fmt(w->lbl_trfc_ns, "%.0f", d->trfc_ns);
+        set_label_fmt(w->lbl_rfc, "%u", d->rfc);
+        set_label_fmt(w->lbl_rfc2, "%u", d->rfc2);
+    }
+    set_label_fmt(w->lbl_rfcsb, "%u", d->rfcsb);
+}
+
+/* Rendering selection never polls hardware or changes the UMC timing source. */
+static void refresh_selected_module_ui(app_widgets_t *w)
+{
+    const system_summary_t *s = &w->summary;
+    int mi = w->selected_module;
+    if (mi < 0 || mi >= s->module_count) {
+        set_label_text(w->lbl_capacity, "—");
+        set_label_text(w->lbl_manufacturer, "—");
+        set_label_text(w->lbl_part_number, "—");
+        set_label_text(w->lbl_serial_number, "—");
+        set_label_text(w->lbl_rank, "—");
+        set_label_text(w->lbl_module_temp, "—");
+        gtk_widget_set_tooltip_text(w->lbl_module_temp, NULL);
+        return;
+    }
+    const memory_module_t *mod = &s->modules[mi];
+    set_label_text(w->lbl_capacity, mod->capacity_display);
+    set_label_text(w->lbl_manufacturer, mod->manufacturer[0] ? mod->manufacturer : "—");
+    set_label_text(w->lbl_part_number, mod->part_number[0] ? mod->part_number : "—");
+    set_label_text(w->lbl_serial_number, mod->serial_number[0] ? mod->serial_number : "—");
+    const char *rank = mod->rank == RANK_QR ? "QR" : mod->rank == RANK_DR ? "DR" : "SR";
+    set_label_text(w->lbl_rank, rank);
+    if (mod->temp_state == DIMM_TEMP_ASSOCIATED && mod->temperature_available)
+        set_label_fmt(w->lbl_module_temp, "%.2f °C", mod->temperature_c);
+    else if (mod->temp_state == DIMM_TEMP_ASSOCIATED || mod->temp_state == DIMM_TEMP_SENSOR_MISSING)
+        set_label_text(w->lbl_module_temp, "Unavailable");
+    else
+        set_label_text(w->lbl_module_temp, "Unassociated");
+    char tooltip[320];
+    snprintf(tooltip, sizeof(tooltip), "%s%s%s%s",
+             dimm_temperature_reason(mod->temp_state),
+             mod->temperature_sensor[0] ? "\n" : "", mod->temperature_sensor,
+             mod->temp_state == DIMM_TEMP_ASSOCIATED && !mod->temperature_available
+                ? "\nCurrent temperature reading unavailable." : "");
+    gtk_widget_set_tooltip_text(w->lbl_module_temp, tooltip);
+}
+
 static void refresh_ui(app_widgets_t *w)
 {
     backend_read_summary(&w->summary);
@@ -414,8 +505,6 @@ static void refresh_ui(app_widgets_t *w)
         w->modules_populated = 1;
     }
 
-    int mi = w->selected_module;
-
     /* DIMM speeds */
     if (s->memory.frequency > 0.0f)
         set_label_fmt(w->lbl_speed, "%.0f MT/s", s->memory.frequency);
@@ -429,21 +518,26 @@ static void refresh_ui(app_widgets_t *w)
     set_label_text(w->lbl_powerdown, d->power_down_enabled ? "True" : "False");
 
     /* SPD temp */
-    if (mi >= 0 && mi < m->spd_temps_count)
-        set_label_fmt(w->lbl_spd_temp, "%.1f °C", m->spd_temps_c[mi]);
-    else
+    if (m->spd_temps_count > 0) {
+        char temps[MAX_MODULES * (STR_SHORT + 32)] = {0};
+        size_t used = 0;
+        for (int i = 0; i < m->spd_temps_count && i < MAX_MODULES; i++) {
+            int n;
+            if (m->spd_temps_available[i])
+                n = snprintf(temps + used, sizeof(temps) - used, "%s%s: %.2f °C",
+                             i ? "\n" : "", m->spd_temp_labels[i], m->spd_temps_c[i]);
+            else
+                n = snprintf(temps + used, sizeof(temps) - used, "%s%s: Unavailable",
+                             i ? "\n" : "", m->spd_temp_labels[i]);
+            if (n < 0 || (size_t)n >= sizeof(temps) - used) break;
+            used += (size_t)n;
+        }
+        set_label_text(w->lbl_spd_temp, temps);
+    } else {
         set_label_text(w->lbl_spd_temp, "—");
-
-    /* DIMM info */
-    if (mi >= 0 && mi < s->module_count) {
-        const memory_module_t *mod = &s->modules[mi];
-        set_label_text(w->lbl_capacity, mod->capacity_display);
-        set_label_text(w->lbl_manufacturer, mod->manufacturer[0] ? mod->manufacturer : "—");
-        set_label_text(w->lbl_part_number, mod->part_number[0] ? mod->part_number : "—");
-        set_label_text(w->lbl_serial_number, mod->serial_number[0] ? mod->serial_number : "—");
-        const char *rank_str = mod->rank == RANK_QR ? "QR" : mod->rank == RANK_DR ? "DR" : "SR";
-        set_label_text(w->lbl_rank, rank_str);
     }
+
+    refresh_selected_module_ui(w);
     set_label_text(w->lbl_cmd2t, d->cmd2t[0] ? d->cmd2t : "—");
 
 /* Helper: show voltage or "—" if unavailable (0) */
@@ -475,10 +569,7 @@ static void refresh_ui(app_widgets_t *w)
     set_label_fmt(w->lbl_tfaw, "%u", d->tfaw);
     set_label_fmt(w->lbl_twr, "%u", d->twr);
     set_label_fmt(w->lbl_tcwl, "%u", d->tcwl);
-    set_label_fmt(w->lbl_trfc_ns, "%.0f", d->trfc_ns);
-    set_label_fmt(w->lbl_rfc, "%u", d->rfc);
-    set_label_fmt(w->lbl_rfc2, "%u", d->rfc2);
-    set_label_fmt(w->lbl_rfcsb, "%u", d->rfcsb);
+    refresh_rfc_ui(w, d);
 
     /* Secondary timings */
     set_label_fmt(w->lbl_rtp, "%u", d->rtp);
@@ -832,7 +923,9 @@ static void on_module_changed(GtkDropDown *dropdown, GParamSpec *pspec, gpointer
 {
     (void)pspec;
     app_widgets_t *w = (app_widgets_t *)user_data;
-    w->selected_module = (int)gtk_drop_down_get_selected(dropdown);
+    guint selected = gtk_drop_down_get_selected(dropdown);
+    w->selected_module = selected < (guint)w->summary.module_count ? (int)selected : -1;
+    refresh_selected_module_ui(w);
 }
 
 /* ── App activate ───────────────────────────────────────────────────── */

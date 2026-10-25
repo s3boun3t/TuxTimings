@@ -5,24 +5,51 @@
 
 #define SMN_PATH "/sys/kernel/ryzen_smu_drv/smn"
 
-static uint32_t read_smn(uint32_t address)
+/* This reports userspace I/O success only. ryzen_smu 0.1.7 has a shared
+ * result buffer and does not propagate every hardware failure to syscalls. */
+static bool try_read_smn(uint32_t address, uint32_t *value)
 {
+    *value = 0;
     FILE *f = fopen(SMN_PATH, "r+b");
-    if (!f) return 0;
-    /* Write address (little-endian) */
+    if (!f) return false;
+    /* Exactly four address bytes request a read; eight bytes would write
+     * a target register. Never retry a partial submission. */
     uint8_t buf[4];
     buf[0] = (uint8_t)(address);
     buf[1] = (uint8_t)(address >> 8);
     buf[2] = (uint8_t)(address >> 16);
     buf[3] = (uint8_t)(address >> 24);
-    if (fwrite(buf, 1, 4, f) != 4) { fclose(f); return 0; }
-    fflush(f);
-    /* Read back value */
-    rewind(f);
-    if (fread(buf, 1, 4, f) != 4) { fclose(f); return 0; }
-    fclose(f);
-    return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
-           ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    bool ok = fwrite(buf, 1, sizeof(buf), f) == sizeof(buf);
+    if (ok) ok = fflush(f) == 0;
+    if (ok) ok = fseek(f, 0, SEEK_SET) == 0;
+    if (ok) ok = fread(buf, 1, sizeof(buf), f) == sizeof(buf);
+    if (fclose(f) != 0) ok = false;
+    if (ok)
+        *value = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+                 ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    return ok;
+}
+
+static uint32_t read_smn(uint32_t address)
+{
+    uint32_t value;
+    try_read_smn(address, &value);
+    return value;
+}
+
+const char *dram_fgr_label(uint32_t code)
+{
+    switch (code) {
+    case 0: return "Normal 1×";
+    case 1: return "Fixed 2×";
+    case 2: return "Fixed 4×";
+    case 3: return "Reserved (3)";
+    case 4: return "Reserved (4)";
+    case 5: return "On-the-fly 1×/2×";
+    case 6: return "On-the-fly 1×/4×";
+    case 7: return "Reserved (7)";
+    default: return "Unknown";
+    }
 }
 
 static float to_nanoseconds(uint32_t cycles, float freq_mhz)
@@ -167,32 +194,45 @@ static void read_ddr4_timings(dram_timings_t *d)
      *   - Cmd2T: bit 10
      *   - GDM:   bit 11
      */
-    uint32_t ratio_reg = read_smn(offset | 0x50200);
+    uint32_t ratio_reg;
+    bool ratio_io_ok = try_read_smn(offset | 0x50200, &ratio_reg);
     float ratio = (float)bit_slice(ratio_reg, 7, 0) / 3.0f;
     float mem_freq = ratio * 200.0f;
     d->frequency_hint_mhz = mem_freq;
+    d->ddr4_ratio_available = ratio_io_ok && ratio > 0.0f;
 
     uint32_t cmd2t_bit = bit_slice(ratio_reg, 10, 10);
     snprintf(d->cmd2t, sizeof(d->cmd2t), "%s", cmd2t_bit ? "2T" : "1T");
     d->gdm_enabled = bit_slice(ratio_reg, 11, 11) == 1;
-    uint32_t refresh_reg = read_smn(offset | 0x5012C);
+    uint32_t refresh_reg;
+    d->ddr4_fgr_io_ok = try_read_smn(offset | 0x5012C, &refresh_reg);
     d->power_down_enabled = bit_slice(refresh_reg, 28, 28) == 1;
 
     read_common_timings(offset, d);
 
     /* RFC - DDR4: first non-default from 2 registers */
-    uint32_t trfc0 = read_smn(offset | 0x50260);
-    uint32_t trfc1 = read_smn(offset | 0x50264);
+    uint32_t trfc0, trfc1;
+    bool rfc0_io_ok = try_read_smn(offset | 0x50260, &trfc0);
+    bool rfc1_io_ok = try_read_smn(offset | 0x50264, &trfc1);
     uint32_t trfc_reg = (trfc0 != trfc1) ? ((trfc0 != 0x21060138) ? trfc0 : trfc1) : trfc0;
+    d->ddr4_rfc_available = rfc0_io_ok && rfc1_io_ok && trfc_reg != 0;
     if (trfc_reg) {
         d->rfc  = bit_slice(trfc_reg, 10, 0);
         d->rfc2 = bit_slice(trfc_reg, 21, 11);
+        d->rfc4 = bit_slice(trfc_reg, 31, 22);
     }
+    d->fgr = bit_slice(refresh_reg, 18, 16);
 
-    /* Nanosecond conversions (DDR4 path) */
-    d->trefi_ns  = to_nanoseconds(d->refi, mem_freq);
-    d->trfc_ns   = to_nanoseconds(d->rfc, mem_freq);
-    d->trfc2_ns  = to_nanoseconds(d->rfc2, mem_freq);
+    /* mem_freq is the effective DDR4 data rate in MT/s, not MCLK MHz.
+     * Do not halve the result below 2000 MT/s. Keep the DDR5 path unchanged.
+     * These are the three programmed timings, not an instantaneous FGR mode. */
+    if (mem_freq > 0.0f) {
+        const float ns_per_clock = 2000.0f / mem_freq;
+        d->trefi_ns = (float)d->refi * ns_per_clock;
+        d->trfc_ns = (float)d->rfc * ns_per_clock;
+        d->trfc2_ns = (float)d->rfc2 * ns_per_clock;
+        d->trfc4_ns = (float)d->rfc4 * ns_per_clock;
+    }
 }
 
 void dram_read_timings(int codename_index, dram_timings_t *out)
@@ -202,6 +242,7 @@ void dram_read_timings(int codename_index, dram_timings_t *out)
     case 20: case 21: /* Raphael (Ryzen 7000), Phoenix (Ryzen 7040/8040) — Zen4 DDR5 */
     case 22: case 24: /* Strix Point / Hawk Point — Zen5/Zen4c DDR5 */
     case 23:          /* Granite Ridge (Ryzen 9000) — Zen5 DDR5 */
+        out->layout = DRAM_LAYOUT_DDR5;
         read_ddr5_timings(out);
         break;
     case 2:  /* Renoir (APU, DDR4/LPDDR4) */
@@ -213,6 +254,7 @@ void dram_read_timings(int codename_index, dram_timings_t *out)
     case 17: /* Lucienne (APU, DDR4/LPDDR4) */
     case 4: case 9: case 10: case 12: case 18: case 19:
         /* Matisse, Summit, Pinnacle, Vermeer, Naples, Chagall (DDR4) */
+        out->layout = DRAM_LAYOUT_DDR4;
         read_ddr4_timings(out);
         break;
     default:

@@ -22,3 +22,7 @@ sources/*
 /SUIVI.md
 /.agents/
 /.codex/
+
+# Local technical documentation and work plans
+/docs/
+/Linux/docs/

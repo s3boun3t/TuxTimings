@@ -10,7 +10,6 @@ If your CPU family is not listed or shows incomplete readings, you can help by r
 
 ### Documentation
 
-- **PM table indices reference**: [`Linux/docs/PM_TABLE_INDICES.md`](Linux/docs/PM_TABLE_INDICES.md)
 
 ### Prerequisites
 
@@ -120,9 +119,7 @@ fixtures in temporary directories. `make -C Linux/tests check-ui` additionally
 requires a working GTK display; it substitutes the backend and benchmarks.
 Set `UI_CAPTURE_DIR=/chosen/path` to retain PNGs and a build/scenario manifest
 in a unique subdirectory; temporary captures are removed by default.
-See [value provenance and validation](Linux/docs/VALUES_VALIDATION.md),
-[DDR4 decoder audit](Linux/docs/DDR4_DECODER_AUDIT.md) and
-[SMN transport limits](Linux/docs/SMN_TRANSPORT.md). These tests do not certify
+These tests do not certify
 hardware readings or authorize module loading and firmware calls.
 
 ### License

@@ -311,7 +311,7 @@ void pm_table_read(uint32_t version, const float *table, int count,
     apply_named(map, table, count, out);
 
     /* 0x380905 / 0x5d0 bytes: 39 and 44 are setpoints; telemetry is
-     * 40 (CPU) and 45 (SoC). See Linux/docs/PM_TABLE_INDICES.md.
+     * 40 (CPU) and 45 (SoC).
      * Match the table layout, independently of CPU SKU or motherboard.
      */
     if (version == 0x380905 && count == 372) {

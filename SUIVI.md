@@ -1,6 +1,6 @@
 # Suivi TuxTimings
 
-## État vérifié
+## État initial vérifié avant consolidation
 - Branche : `fix/jc42-module-lifecycle` (vérifiée le 25 octobre 2026).
 - HEAD : `5c618f188f4287e3e4e73fd59e0f0920aa09a12b`.
 - Modifications non commitées : 12 fichiers suivis modifiés ; nombreux fichiers non suivis (patchs, sauvegardes, tests, outils, passation, paquet Debian et consignes). Préservés lors du contrôle GitHub.
@@ -52,3 +52,10 @@
 - Validation logicielle : reconstruction complète `make -B -C Linux all` réussie ; `make -B -C Linux/tests check` réussi (cinq exécutables) ; test AOD AML compilé avec `-Wall -Wextra -Werror` et exécuté avec succès ; test de protocole AOD WMI réussi ; dix tests Python du diagnostic DDR4 réussis ; `git diff --check` sans erreur.
 - Test GTK : compilation réussie, exécution bloquée par `Failed to open display` ; aucun `xvfb-run` disponible. Validation visuelle non réalisée dans cette session.
 - Aucun module chargé, aucune méthode firmware appelée, aucun réglage BIOS ou SMN modifié ; tests sur données synthétiques uniquement. Aucune nouvelle validation matérielle.
+
+## Envoi vers le fork — 25 octobre 2026
+- Push effectué avec succès vers `origin/fix/jc42-module-lifecycle`, qui est désormais la branche suivie localement. L’authentification Git en écriture fonctionne dans cette session ; la réserve du contrôle initial est levée.
+- Commits applicatifs envoyés : les deux commits existants `86d23b1` et `5c618f1`, puis `30da09c` (application et tests), `7aa48a7` (diagnostics) et `ba957b8` (consignes et compétences).
+- Cette mise à jour du suivi est enregistrée dans un commit documentaire supplémentaire ; utiliser `git log -1` pour son identifiant final.
+- Les 12 fichiers initialement modifiés sont enregistrés ; seuls les fichiers de sauvegarde, patchs, passation, rapport et paquet Debian volontairement exclus restent non suivis.
+- Aucun push sur `main`, aucune fusion et aucune PR créée.

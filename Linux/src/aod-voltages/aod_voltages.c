@@ -129,7 +129,7 @@ static u32 read_mv(int offset)
 {
     u32 v;
 
-    if (!aod_base || offset < 0 || offset + 4 > AOD_REGION_SIZE)
+    if (!aod_base || offset <= 0 || offset + 4 > AOD_REGION_SIZE)
         return 0;
     memcpy(&v, (u8 *)aod_base + offset, 4);
     return v;
@@ -184,7 +184,7 @@ static ssize_t show_named(struct kobject *kobj,
 
     if (!aod_base)
         return scnprintf(buf, PAGE_SIZE, "error: not mapped\n");
-    if (offset < 0 || offset + 4 > AOD_REGION_SIZE)
+    if (offset <= 0 || offset + 4 > AOD_REGION_SIZE)
         return scnprintf(buf, PAGE_SIZE,
                          "unset — reload with: modprobe aod_voltages off_vddio=N ...\n");
 
@@ -363,7 +363,7 @@ static const struct {
     { 23, 0, 9084, 9088, 9092, 9096 },  /* Granite Ridge */
     { 20, 0, 9096, 9100, 9104, 9108 },  /* Raphael */
     {  0, 0x1A, 9084, 9088, 9092, 9096 }, /* Zen 5 (fallback) */
-    {  0, 0x19, 9084, 9088, 9092, 9096 }, /* Zen 3/4 (fallback) */
+    /* No generic Family 19h fallback: offsets require validation. */
 };
 
 /* Read SMU codename index from sysfs (ryzen_smu driver exposes this).

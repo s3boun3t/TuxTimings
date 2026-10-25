@@ -16,3 +16,9 @@ pm_dumps/
 
 # Sources
 sources/*
+
+# Local assistant configuration and working notes
+/AGENTS.md
+/SUIVI.md
+/.agents/
+/.codex/

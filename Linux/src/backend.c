@@ -599,7 +599,7 @@ static void read_spd_temps(smu_metrics_t *m)
         for (; name[li] && li < 63; li++)
             lower[li] = (char)tolower((unsigned char)name[li]);
         lower[li] = '\0';
-        if (!strstr(lower, "spd5118")) continue;
+        if (!strstr(lower, "spd5118") && !strstr(lower, "jc42")) continue;
 
         char tpath[640];
         snprintf(tpath, sizeof(tpath), "/sys/class/hwmon/%s/temp1_input", ent->d_name);
@@ -985,9 +985,11 @@ void backend_read_summary(system_summary_t *out)
         if (access("/sys/module/tuxbench", F_OK) != 0) {
             snprintf(cmd, sizeof(cmd), "%s tuxbench 2>/dev/null", mp);
             run_shell(cmd);
+
+            /* Only unload tuxbench if we loaded it ourselves. */
+            if (access("/sys/module/tuxbench", F_OK) == 0)
+                s_loaded_tuxbench = 1;
         }
-        if (access("/sys/module/tuxbench", F_OK) == 0)
-            s_loaded_tuxbench = 1;
 
         /* Load nct6775 if no Nuvoton hwmon driver is active.
          * Covers NCT6775F/6776F/6779D/6791D/6792D/6793D/
@@ -1133,11 +1135,11 @@ void backend_cleanup(void)
      * system()/popen() are not async-signal-safe and silently fail in signals. */
     if (s_loaded_aod_voltages) {
         s_loaded_aod_voltages = 0;
-        rmmod_module(rm, "aod_voltages");
+        /* Leave shared aod_voltages module loaded. */
     }
     if (s_loaded_ryzen_smu) {
         s_loaded_ryzen_smu = 0;
-        rmmod_module(rm, "ryzen_smu");
+        /* Leave shared ryzen_smu module loaded. */
     }
     if (s_loaded_tuxbench) {
         s_loaded_tuxbench = 0;
